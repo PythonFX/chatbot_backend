@@ -7,9 +7,18 @@ def generate_title(first_message: str) -> str:
     if not first_message.strip():
         return "New Chat"
 
+    # If message is very short, use it directly as title
+    cleaned = first_message.strip()
+    if len(cleaned) <= 20:
+        return cleaned[:50] if cleaned else "New Chat"
+
     try:
         print(f"[TitleGenerator] Calling MiniMax for: {first_message[:30]}...")
         llm = create_minimax_client()
+
+        # Disable thinking to speed up title generation
+        llm = llm.with_config({"thinking": {"type": "disabled"}})
+
         response = llm.invoke([
             SystemMessage(content="You are a title generator. Given a user's first message to a chatbot, generate a very short title (3-5 words max) that summarizes what the conversation is about. Only respond with the title, nothing else."),
             HumanMessage(content=first_message),

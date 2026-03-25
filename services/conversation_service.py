@@ -146,6 +146,36 @@ def update_message(
     return None
 
 
+def append_chunk(
+    conversation_id: str,
+    message_id: str,
+    text: str = "",
+    thinking: str = "",
+) -> Optional[Message]:
+    """
+    Append content to a message's content/thinking fields.
+    Used by stream_manager to incrementally update messages.
+    """
+    conversation = get_conversation(conversation_id)
+    if not conversation:
+        return None
+
+    for m in conversation.messages:
+        if m.id == message_id:
+            if text:
+                m.content += text
+            if thinking:
+                if m.thinking:
+                    m.thinking += thinking
+                else:
+                    m.thinking = thinking
+            # Note: don't update updated_at on every chunk to reduce disk writes
+            # Only update on meaningful boundaries
+            _save_conversation(conversation)
+            return m
+    return None
+
+
 def save_conversation(conversation: Conversation) -> None:
     """Public method to save a conversation."""
     conversation.updated_at = datetime.utcnow()

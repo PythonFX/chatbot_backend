@@ -1,14 +1,16 @@
 import asyncio
 import json
-import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
 from services import conversation_service
 from services.conversation_service import save_conversation
 from services.title_generator import generate_title
 from services.minimax_client import create_minimax_client, is_minimax_configured
+from services.stream_manager import stream_manager
+
 
 router = APIRouter(tags=["chat"])
 
@@ -16,6 +18,7 @@ router = APIRouter(tags=["chat"])
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
+    resume: bool = False  # If True, resume existing stream instead of starting new one
 
 
 class ChatResponse(BaseModel):
@@ -40,7 +43,7 @@ class RegenerateResponse(BaseModel):
     type: str | None = None
 
 
-# Track stop events per conversation
+# Track stop events per conversation (legacy, kept for compatibility)
 stop_events: dict[str, asyncio.Event] = {}
 
 
@@ -57,83 +60,19 @@ def _build_langchain_messages(messages: list) -> list:
     return langchain_messages
 
 
-def _parse_minimax_chunk(chunk) -> dict:
-    """Parse a MiniMax streaming chunk and extract relevant info."""
-    result = {"text": "", "thinking": None}
-
-    if hasattr(chunk, "content"):
-        content = chunk.content
-        if isinstance(content, list):
-            for block in content:
-                if hasattr(block, "type"):
-                    if block.type == "thinking" and hasattr(block, "thinking"):
-                        result["thinking"] = block.thinking
-                    elif block.type == "text" and hasattr(block, "text"):
-                        result["text"] += block.text
-                elif isinstance(block, dict):
-                    if block.get("type") == "thinking":
-                        result["thinking"] = block.get("thinking")
-                    elif block.get("type") == "text":
-                        result["text"] += block.get("text", "")
-        elif isinstance(content, str):
-            result["text"] = content
-
-    return result
-
-
-async def _stream_llm(messages: list, conversation_id: str):
-    """Stream LLM response and yield chunks."""
-    llm = create_minimax_client()
-    stop_event = stop_events.get(conversation_id)
-
-    print(f"[Stream] Starting for conversation: {conversation_id}")
-
-    try:
-        async for chunk in llm.astream(messages):
-            if stop_event and stop_event.is_set():
-                print(f"[Stream] Stopped by event for conversation: {conversation_id}")
-                yield {"type": "stopped", "text": ""}
-                return
-
-            parsed = _parse_minimax_chunk(chunk)
-
-            # Yield thinking separately if present
-            if parsed["thinking"]:
-                print(f"[Thinking] {parsed['thinking']}")
-                yield {
-                    "type": "thinking",
-                    "thinking": parsed["thinking"],
-                }
-
-            # Yield text chunk
-            if parsed["text"]:
-                print(f"[Text Chunk] {parsed['text']}", end="", flush=True)
-                yield {
-                    "type": "chunk",
-                    "text": parsed["text"],
-                }
-
-    except asyncio.CancelledError:
-        print(f"[Stream] Cancelled for conversation: {conversation_id}")
-        yield {"type": "stopped", "text": ""}
-        return
-
-
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """Send a message and stream AI response using Server-Sent Events."""
+    """
+    Send a message and stream AI response using Server-Sent Events.
+
+    The LLM stream runs in a background task that persists even if the
+    HTTP connection is closed. Chunks are saved to JSON in real-time.
+    """
     if not is_minimax_configured():
         return StreamingResponse(
             iter([json.dumps({"type": "error", "error": "MiniMax not configured"})]),
             media_type="application/json",
             status_code=500,
-        )
-
-    if not request.message.strip():
-        return StreamingResponse(
-            iter([json.dumps({"type": "error", "error": "Empty message"})]),
-            media_type="application/json",
-            status_code=400,
         )
 
     # Get conversation
@@ -143,6 +82,76 @@ async def chat_stream(request: ChatRequest):
             iter([json.dumps({"type": "error", "error": "Conversation not found"})]),
             media_type="application/json",
             status_code=404,
+        )
+
+    # Handle resume mode: re-subscribe to an existing stream (must be before empty message check)
+    if request.resume:
+        existing_state = stream_manager.get_stream(request.conversation_id)
+        if not existing_state:
+            return StreamingResponse(
+                iter([json.dumps({"type": "error", "error": "No active stream to resume"})]),
+                media_type="application/json",
+                status_code=404,
+            )
+
+        print(f"[Chat] Resuming stream for conversation: {request.conversation_id}")
+
+        async def generate_resume():
+            try:
+                # Send start event first
+                start_data = {
+                    'type': 'start',
+                    'message_id': existing_state.assistant_msg_id,
+                    'title': existing_state.title,
+                }
+                yield f"data: {json.dumps(start_data)}\n\n"
+
+                # Send accumulated content as first chunk(s) if any
+                if existing_state.full_text:
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': existing_state.full_text})}\n\n"
+                if existing_state.full_thinking:
+                    yield f"data: {json.dumps({'type': 'thinking', 'thinking': existing_state.full_thinking})}\n\n"
+
+                while True:
+                    if existing_state.is_complete and len(existing_state.chunks) == 0:
+                        # Stream is done and no more chunks
+                        done_data = {'type': 'done', 'message_id': existing_state.assistant_msg_id, 'title': existing_state.title}
+                        yield f"data: {json.dumps(done_data)}\n\n"
+                        return
+
+                    chunks = await stream_manager.wait_for_chunks(existing_state, timeout=60.0)
+                    for chunk in chunks:
+                        if chunk["type"] == "done":
+                            # Drain any remaining chunks before exiting
+                            continue
+                        elif chunk["type"] == "stopped":
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            return
+                        elif chunk["type"] == "error":
+                            return
+                        elif chunk["type"] == "chunk":
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text']})}\n\n"
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                print(f"[Chat] Resume connection closed for: {request.conversation_id}")
+                raise
+
+        return StreamingResponse(
+            generate_resume(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Non-resume requests require a message
+    if not request.message.strip():
+        return StreamingResponse(
+            iter([json.dumps({"type": "error", "error": "Empty message"})]),
+            media_type="application/json",
+            status_code=400,
         )
 
     # Cancel any ongoing generation for this conversation
@@ -164,17 +173,6 @@ async def chat_stream(request: ChatRequest):
         )
     conversation, user_msg = result
 
-    # Generate title if this is the first user message (run in background)
-    title = conversation.title
-    title_task = None
-    if len(conversation.messages) == 1 and conversation.title == "New Chat":
-        print(f"[Title] Starting background title generation for: {request.message[:50]}...")
-
-        def run_title_gen():
-            return generate_title(request.message)
-
-        title_task = asyncio.create_task(asyncio.to_thread(run_title_gen))
-
     # Build messages for LLM
     langchain_messages = _build_langchain_messages(conversation.messages)
 
@@ -194,88 +192,75 @@ async def chat_stream(request: ChatRequest):
     _, placeholder_msg = placeholder_result
     assistant_msg_id = placeholder_msg.id
 
+    # Get current title (will be updated after stream completes if first message)
+    title = conversation.title
+
+    # Start the background stream (this runs independently of HTTP)
+    stream_state = stream_manager.start_stream(
+        request.conversation_id,
+        assistant_msg_id,
+        langchain_messages,
+        title=title,
+    )
+
     async def generate():
         nonlocal title
-
-        full_text = ""
-        full_thinking = ""
 
         yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
 
         try:
-            async for chunk in _stream_llm(langchain_messages, request.conversation_id):
-                if chunk["type"] == "stopped":
+            # Wait for chunks from the background stream
+            while True:
+                # Check if stream is already complete
+                if stream_state.is_complete and len(stream_state.chunks) == 0:
                     break
 
-                if chunk["type"] == "thinking":
-                    full_thinking += chunk["thinking"]
-                    # Update message in storage
-                    conversation_service.update_message(
-                        request.conversation_id,
-                        assistant_msg_id,
-                        thinking=full_thinking,
-                    )
-                    yield f"data: {json.dumps({'type': 'thinking', 'thinking': full_thinking})}\n\n"
-                elif chunk["text"]:
-                    full_text += chunk["text"]
-                    # Update message in storage
-                    conversation_service.update_message(
-                        request.conversation_id,
-                        assistant_msg_id,
-                        content=full_text,
-                    )
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text']})}\n\n"
+                # Wait for new chunks
+                chunks = await stream_manager.wait_for_chunks(stream_state, timeout=60.0)
 
-            # Finalize: mark message as complete
-            if full_text:
-                # Check if title was generated in background
-                if title_task and not title_task.done():
-                    # Wait for title if still pending
-                    new_title = await title_task
-                    if new_title and new_title != "New Chat":
-                        title = new_title
-                        conversation_service.update_title(conversation.id, title)
-                        print(f"[Title] Updated after stream: {title}")
-                elif title_task:
-                    try:
-                        new_title = title_task.result()
-                        if new_title and new_title != "New Chat":
-                            title = new_title
-                            conversation_service.update_title(conversation.id, title)
-                            print(f"[Title] Updated after stream: {title}")
-                    except Exception as e:
-                        print(f"[Title] Task error: {e}")
+                for chunk in chunks:
+                    if chunk["type"] == "done":
+                        # Generate title after stream completes (only for first message)
+                        if len(conversation.messages) == 1 and conversation.title == "New Chat":
+                            print(f"[Title] Starting title generation after stream for: {request.message[:50]}...")
 
-                conversation_service.update_message(
-                    request.conversation_id,
-                    assistant_msg_id,
-                    content=full_text,
-                    thinking=full_thinking,
-                    complete=True,
-                )
-                print(f"\n[Complete] Final text ({len(full_text)} chars):\n{full_text}")
-                if full_thinking:
-                    print(f"[Complete] Final thinking ({len(full_thinking)} chars):\n{full_thinking}")
-                yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'title': title})}\n\n"
-            else:
-                # Remove empty message if no content
-                conversation_service.remove_message(request.conversation_id, assistant_msg_id)
-                print(f"\n[Error] Empty response")
-                yield f"data: {json.dumps({'type': 'error', 'error': 'Empty response'})}\n\n"
+                            def run_title_gen():
+                                return generate_title(request.message)
+
+                            title_task = asyncio.create_task(asyncio.to_thread(run_title_gen))
+                            new_title = await title_task
+                            if new_title and new_title != "New Chat":
+                                title = new_title
+                                conversation_service.update_title(conversation.id, title)
+                                print(f"[Title] Updated after stream: {title}")
+
+                        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'title': title})}\n\n"
+                        return
+
+                    elif chunk["type"] == "stopped":
+                        yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                        return
+
+                    elif chunk["type"] == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error', 'Unknown error')})}\n\n"
+                        return
+
+                    elif chunk["type"] == "chunk":
+                        yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text']})}\n\n"
+
+                    elif chunk["type"] == "thinking":
+                        yield f"data: {json.dumps({'type': 'thinking', 'thinking': chunk['thinking']})}\n\n"
+
+                    # Small yield to prevent blocking
+                    await asyncio.sleep(0)
 
         except asyncio.CancelledError:
-            # Mark message as complete even if cancelled (partial content is saved)
-            conversation_service.update_message(
-                request.conversation_id,
-                assistant_msg_id,
-                complete=True,
-            )
-            print(f"\n[Stopped] Partial text ({len(full_text)} chars):\n{full_text}")
-            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
-        except Exception as e:
-            print(f"\n[Error] {e}")
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            # HTTP connection was closed, but the background stream continues!
+            print(f"[Chat] HTTP connection closed, background stream continues for: {request.conversation_id}")
+            raise
+
         finally:
+            # Don't clean up the stream - let it run in background
             if request.conversation_id in stop_events:
                 del stop_events[request.conversation_id]
 
@@ -293,6 +278,10 @@ async def chat_stream(request: ChatRequest):
 @router.post("/chat/stop/{conversation_id}")
 async def stop_generation(conversation_id: str):
     """Stop ongoing generation for a conversation."""
+    # Stop the background stream
+    stream_manager.stop_stream(conversation_id)
+
+    # Legacy support
     if conversation_id in stop_events:
         stop_events[conversation_id].set()
         return {"status": "cancelled", "conversation_id": conversation_id}
@@ -375,3 +364,27 @@ async def regenerate_response(request: RegenerateRequest):
         thinking=thinking,
         type="text",
     )
+
+
+def _parse_minimax_chunk(chunk) -> dict:
+    """Parse a MiniMax streaming chunk and extract relevant info."""
+    result = {"text": "", "thinking": None}
+
+    if hasattr(chunk, "content"):
+        content = chunk.content
+        if isinstance(content, list):
+            for block in content:
+                if hasattr(block, "type"):
+                    if block.type == "thinking" and hasattr(block, "thinking"):
+                        result["thinking"] = block.thinking
+                    elif block.type == "text" and hasattr(block, "text"):
+                        result["text"] += block.text
+                elif isinstance(block, dict):
+                    if block.get("type") == "thinking":
+                        result["thinking"] = block.get("thinking")
+                    elif block.get("type") == "text":
+                        result["text"] += block.get("text", "")
+        elif isinstance(content, str):
+            result["text"] = content
+
+    return result
