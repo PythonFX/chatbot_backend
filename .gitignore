@@ -46,5 +46,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Conversation data
-data/conversations/
+# Data (conversations, files, embeddings)
+data/
