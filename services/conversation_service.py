@@ -138,8 +138,9 @@ def update_message(
     content: Optional[str] = None,
     thinking: Optional[str] = None,
     complete: Optional[bool] = None,
+    rag_contexts: Optional[list[dict]] = None,
 ) -> Optional[Message]:
-    """Update a message's content, thinking, or complete status."""
+    """Update a message's content, thinking, complete status, or rag_contexts."""
     conversation = get_conversation(conversation_id)
     if not conversation:
         return None
@@ -152,6 +153,8 @@ def update_message(
                 m.thinking = thinking
             if complete is not None:
                 m.complete = complete
+            if rag_contexts is not None:
+                m.rag_contexts = rag_contexts
             conversation.updated_at = datetime.utcnow()
             _save_conversation(conversation)
             return m

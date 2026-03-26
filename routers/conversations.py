@@ -46,6 +46,7 @@ class MessageResponse(BaseModel):
     thinking: str | None = None
     type: str | None = None
     complete: bool = True
+    rag_contexts: list[dict] | None = None
 
 
 class ConversationResponse(BaseModel):
@@ -78,6 +79,7 @@ async def list_conversations():
                     thinking=m.thinking,
                     type=m.type,
                     complete=m.complete,
+                    rag_contexts=m.rag_contexts,
                 )
                 for m in c.messages
             ],
@@ -258,3 +260,30 @@ async def auto_rename_conversation(conversation_id: str):
         created_at=updated.created_at.isoformat(),
         updated_at=updated.updated_at.isoformat(),
     )
+
+
+class RagContextsResponse(BaseModel):
+    conversation_id: str
+    message_id: str
+    rag_contexts: list[dict] | None = None
+
+
+@router.get("/{conversation_id}/messages/{message_id}/rag-contexts", response_model=RagContextsResponse)
+async def get_message_rag_contexts(conversation_id: str, message_id: str):
+    """
+    Get the RAG contexts used for a specific message in a conversation.
+    Returns the chunk_text and score for each context retrieved during RAG.
+    """
+    conversation = conversation_service.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    for m in conversation.messages:
+        if m.id == message_id:
+            return RagContextsResponse(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                rag_contexts=m.rag_contexts,
+            )
+
+    raise HTTPException(status_code=404, detail="Message not found")

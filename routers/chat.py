@@ -177,7 +177,8 @@ async def chat_stream(request: ChatRequest):
     # Build messages for LLM
     langchain_messages = _build_langchain_messages(conversation.messages)
 
-    # Add RAG context if conversation has linked files
+    # Search for RAG context if conversation has linked files
+    rag_chunks: list[dict] = []
     if conversation.file_ids:
         print(f"[Chat] Conversation has {len(conversation.file_ids)} linked files, searching for RAG context...")
         try:
@@ -227,6 +228,7 @@ async def chat_stream(request: ChatRequest):
         assistant_msg_id,
         langchain_messages,
         title=title,
+        rag_contexts=rag_chunks,
     )
 
     async def generate():

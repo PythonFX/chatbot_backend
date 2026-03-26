@@ -246,3 +246,40 @@ async def unload_file(file_id: str):
 
     unload_file_embeddings(file_id)
     return {"file_id": file_id, "status": "unloaded"}
+
+
+@router.post("/reembed/{file_id}")
+async def reembed_file(file_id: str):
+    """
+    Re-process a file's embeddings with current chunking settings.
+    Use this when chunk_size has changed or to fix improperly chunked files.
+    """
+    metadata = get_file_metadata(file_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if metadata.get("status") == "processing":
+        raise HTTPException(status_code=400, detail="File is still being processed")
+
+    # Delete existing embeddings
+    delete_embeddings(file_id)
+
+    # Get file path and type
+    original_path = metadata.get("original_path")
+    file_type = metadata.get("file_type")
+    if not original_path:
+        raise HTTPException(status_code=500, detail="File path not found in metadata")
+
+    from pathlib import Path
+    file_path = Path(original_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    # Update status
+    from services.file_service import update_file_status
+    update_file_status(file_id, status="processing")
+
+    # Start re-embedding
+    asyncio.create_task(process_file_embedding(file_id, file_path, file_type))
+
+    return {"file_id": file_id, "status": "processing", "message": "Re-embedding started"}

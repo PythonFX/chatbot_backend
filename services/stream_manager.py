@@ -22,6 +22,7 @@ class StreamState:
     full_text: str = ""
     full_thinking: str = ""
     is_complete: bool = False
+    rag_contexts: list[dict] = field(default_factory=list)
 
 
 class StreamManager:
@@ -49,6 +50,7 @@ class StreamManager:
         assistant_msg_id: str,
         messages: list,
         title: str = "New Chat",
+        rag_contexts: list[dict] | None = None,
     ) -> StreamState:
         """
         Start a background task that continuously receives LLM chunks.
@@ -67,6 +69,7 @@ class StreamManager:
             conversation_id=conversation_id,
             assistant_msg_id=assistant_msg_id,
             title=title,
+            rag_contexts=rag_contexts or [],
         )
         self._streams[conversation_id] = state
 
@@ -147,6 +150,7 @@ class StreamManager:
                 content=full_text,
                 thinking=full_thinking,
                 complete=True,
+                rag_contexts=state.rag_contexts,
             )
 
             # Notify waiting generators of completion

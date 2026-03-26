@@ -97,25 +97,47 @@ def _extract_text_from_file(file_path: Path, file_type: str) -> str:
     return text.strip()
 
 
-def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """Split text into overlapping chunks."""
+def _chunk_text(text: str, chunk_size: int = 300, overlap: int = 30) -> list[str]:
+    """Split text into overlapping chunks with sentence-aware splitting."""
     if not text:
         return []
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # Split by Chinese sentence-ending punctuation (followed by any char, not just whitespace)
+    # This handles Chinese text where punctuation isn't followed by space
+    sentences = re.split(r"(?<=[。！？])\s*(?=[^。！？\n])", text)
     chunks = []
     current_chunk = ""
     current_size = 0
 
     for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
         sentence_size = len(sentence)
+        # If single sentence exceeds chunk_size, split by character count
+        if sentence_size > chunk_size:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = ""
+            current_size = 0
+            # Split long sentence into smaller pieces with overlap
+            for i in range(0, sentence_size, chunk_size - overlap):
+                piece = sentence[i:i + chunk_size - overlap]
+                if piece.strip():
+                    chunks.append(piece.strip())
+            continue
+
         if current_size + sentence_size <= chunk_size:
             current_chunk += " " + sentence
             current_size += sentence_size + 1
         else:
             if current_chunk.strip():
                 chunks.append(current_chunk.strip())
-            overlap_words = current_chunk.split()[-overlap // 10:] if current_chunk else []
+            # Word-based overlap
+            words = current_chunk.split()
+            overlap_count = max(1, overlap // 5)
+            overlap_words = words[-overlap_count:] if words else []
             current_chunk = " ".join(overlap_words) + " " + sentence
             current_size = len(current_chunk)
 
