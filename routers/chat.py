@@ -10,6 +10,7 @@ from services.conversation_service import save_conversation
 from services.title_generator import generate_title
 from services.minimax_client import create_minimax_client, is_minimax_configured
 from services.stream_manager import stream_manager
+from services.embedding_service import search_chunks_in_files
 
 
 router = APIRouter(tags=["chat"])
@@ -175,6 +176,31 @@ async def chat_stream(request: ChatRequest):
 
     # Build messages for LLM
     langchain_messages = _build_langchain_messages(conversation.messages)
+
+    # Add RAG context if conversation has linked files
+    if conversation.file_ids:
+        print(f"[Chat] Conversation has {len(conversation.file_ids)} linked files, searching for RAG context...")
+        try:
+            rag_chunks = await search_chunks_in_files(
+                query=request.message,
+                file_ids=conversation.file_ids,
+                top_k=5
+            )
+            if rag_chunks:
+                context_parts = []
+                for i, chunk in enumerate(rag_chunks):
+                    context_parts.append(f"[Context {i+1}] {chunk['chunk_text']}")
+                rag_context = "\n\n".join(context_parts)
+                rag_system_msg = SystemMessage(
+                    content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
+                )
+                # Insert RAG context as second-to-last position (before user message)
+                langchain_messages.insert(-1, rag_system_msg)
+                print(f"[Chat] Added {len(rag_chunks)} RAG chunks to context")
+            else:
+                print(f"[Chat] No relevant chunks found in linked files")
+        except Exception as e:
+            print(f"[Chat] RAG search error: {e}")
 
     # Create assistant message placeholder with complete=False
     placeholder_result = conversation_service.add_message(

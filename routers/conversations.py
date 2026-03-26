@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 from services import conversation_service
 from services.title_generator import generate_title
+from services.conversation_service import SearchResult
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -21,6 +22,22 @@ class AddMessageRequest(BaseModel):
     content: str
 
 
+class SearchResultResponse(BaseModel):
+    conversation_id: str
+    conversation_title: str
+    message_id: str
+    role: str
+    context_before: str
+    matched_text: str
+    context_after: str
+    full_context: str
+
+
+class SearchResponse(BaseModel):
+    query: str
+    results: list[SearchResultResponse]
+
+
 class MessageResponse(BaseModel):
     id: str
     role: str
@@ -35,8 +52,13 @@ class ConversationResponse(BaseModel):
     id: str
     title: str
     messages: list[MessageResponse]
+    file_ids: list[str] = []
     created_at: str
     updated_at: str
+
+
+class UpdateFilesRequest(BaseModel):
+    file_ids: list[str]
 
 
 @router.get("", response_model=list[ConversationResponse])
@@ -73,6 +95,36 @@ async def create_conversation():
     return CreateConversationResponse(id=conversation.id, title=conversation.title)
 
 
+@router.get("/search", response_model=SearchResponse)
+async def search_conversations(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(50, ge=1, le=200, description="Max results to return"),
+):
+    """
+    Search all messages across all conversations.
+    Returns matches with surrounding context, excluding thinking content.
+    """
+    results = conversation_service.search_messages(q, context_length=50)
+    # Apply limit
+    limited_results = results[:limit]
+    return SearchResponse(
+        query=q,
+        results=[
+            SearchResultResponse(
+                conversation_id=r.conversation_id,
+                conversation_title=r.conversation_title,
+                message_id=r.message_id,
+                role=r.role,
+                context_before=r.context_before,
+                matched_text=r.matched_text,
+                context_after=r.context_after,
+                full_context=r.full_context,
+            )
+            for r in limited_results
+        ],
+    )
+
+
 @router.get("/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conversation_id: str):
     """Get a single conversation with all messages."""
@@ -94,6 +146,7 @@ async def get_conversation(conversation_id: str):
             )
             for m in conversation.messages
         ],
+        file_ids=conversation.file_ids,
         created_at=conversation.created_at.isoformat(),
         updated_at=conversation.updated_at.isoformat(),
     )
@@ -120,6 +173,7 @@ async def rename_conversation(conversation_id: str, body: RenameRequest):
             )
             for m in conversation.messages
         ],
+        file_ids=conversation.file_ids,
         created_at=conversation.created_at.isoformat(),
         updated_at=conversation.updated_at.isoformat(),
     )
@@ -131,6 +185,33 @@ async def delete_conversation(conversation_id: str):
     if not conversation_service.delete_conversation(conversation_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "ok"}
+
+
+@router.patch("/{conversation_id}/files", response_model=ConversationResponse)
+async def update_conversation_files(conversation_id: str, body: UpdateFilesRequest):
+    """Update the linked files of a conversation."""
+    conversation = conversation_service.update_file_ids(conversation_id, body.file_ids)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationResponse(
+        id=conversation.id,
+        title=conversation.title,
+        messages=[
+            MessageResponse(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at.isoformat(),
+                thinking=m.thinking,
+                type=m.type,
+                complete=m.complete,
+            )
+            for m in conversation.messages
+        ],
+        file_ids=conversation.file_ids,
+        created_at=conversation.created_at.isoformat(),
+        updated_at=conversation.updated_at.isoformat(),
+    )
 
 
 @router.post("/{conversation_id}/auto-rename", response_model=ConversationResponse)
@@ -173,6 +254,7 @@ async def auto_rename_conversation(conversation_id: str):
             )
             for m in updated.messages
         ],
+        file_ids=updated.file_ids,
         created_at=updated.created_at.isoformat(),
         updated_at=updated.updated_at.isoformat(),
     )

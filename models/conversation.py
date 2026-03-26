@@ -55,6 +55,7 @@ class Conversation(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str = "New Chat"
     messages: list[Message] = []
+    file_ids: list[str] = []  # Linked file IDs for RAG
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -63,6 +64,7 @@ class Conversation(BaseModel):
             "id": self.id,
             "title": self.title,
             "messages": [m.to_dict() for m in self.messages],
+            "file_ids": self.file_ids,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -77,6 +79,7 @@ class Conversation(BaseModel):
             id=data["id"],
             title=data["title"],
             messages=messages,
+            file_ids=data.get("file_ids", []),
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -58,6 +59,17 @@ def update_title(conversation_id: str, title: str) -> Optional[Conversation]:
     if not conversation:
         return None
     conversation.title = title.strip()[:100] or "New Chat"
+    conversation.updated_at = datetime.utcnow()
+    _save_conversation(conversation)
+    return conversation
+
+
+def update_file_ids(conversation_id: str, file_ids: list[str]) -> Optional[Conversation]:
+    """Update the linked file IDs of a conversation."""
+    conversation = get_conversation(conversation_id)
+    if not conversation:
+        return None
+    conversation.file_ids = file_ids
     conversation.updated_at = datetime.utcnow()
     _save_conversation(conversation)
     return conversation
@@ -180,3 +192,76 @@ def save_conversation(conversation: Conversation) -> None:
     """Public method to save a conversation."""
     conversation.updated_at = datetime.utcnow()
     _save_conversation(conversation)
+
+
+@dataclass
+class SearchResult:
+    """Represents a single search match in a message."""
+    conversation_id: str
+    conversation_title: str
+    message_id: str
+    role: str
+    context_before: str  # Text before the match
+    matched_text: str    # The matching text
+    context_after: str   # Text after the match
+    full_context: str     # Combined context with match highlighted (for display)
+
+
+def search_messages(query: str, context_length: int = 50) -> list[SearchResult]:
+    """
+    Search all messages across all conversations for a query string.
+    Returns matches with surrounding context, excluding thinking content.
+
+    Args:
+        query: The search string to find (case-insensitive)
+        context_length: Number of characters to show before/after match
+
+    Returns:
+        List of SearchResult objects with surrounding context
+    """
+    if not query or len(query.strip()) == 0:
+        return []
+
+    query_lower = query.lower()
+    results: list[SearchResult] = []
+
+    conversations = get_all_conversations()
+    for conv in conversations:
+        for msg in conv.messages:
+            # Skip thinking content as per requirement
+            content = msg.content
+            if not content:
+                continue
+
+            content_lower = content.lower()
+            pos = content_lower.find(query_lower)
+            if pos == -1:
+                continue
+
+            # Extract surrounding context
+            start = max(0, pos - context_length)
+            end = min(len(content), pos + len(query) + context_length)
+
+            context_before = content[start:pos]
+            matched_text = content[pos:pos + len(query)]
+            context_after = content[pos + len(query):end]
+
+            # Add ellipsis if there are more characters before/after
+            prefix = "..." if start > 0 else ""
+            suffix = "..." if end < len(content) else ""
+
+            # Build full context for display (single line)
+            full_context = f"{prefix}{context_before}{matched_text}{context_after}{suffix}"
+
+            results.append(SearchResult(
+                conversation_id=conv.id,
+                conversation_title=conv.title,
+                message_id=msg.id,
+                role=msg.role,
+                context_before=context_before,
+                matched_text=matched_text,
+                context_after=context_after,
+                full_context=full_context,
+            ))
+
+    return results
