@@ -34,6 +34,7 @@ class FileMetadataResponse(BaseModel):
     size: int
     uploaded_at: str
     status: str  # "processing", "ready", "error"
+    progress: Optional[int] = None  # 0-100, None when not processing
     error: Optional[str] = None
     chunk_count: Optional[int] = None
     text_preview: Optional[str] = None
@@ -73,6 +74,7 @@ async def list_files():
                 size=f["size"],
                 uploaded_at=f["uploaded_at"],
                 status=f.get("status", "unknown"),
+                progress=f.get("progress"),
                 error=f.get("error"),
                 chunk_count=f.get("chunk_count"),
                 text_preview=f.get("text_preview"),
@@ -95,6 +97,7 @@ async def get_file(file_id: str):
         size=metadata["size"],
         uploaded_at=metadata["uploaded_at"],
         status=metadata.get("status", "unknown"),
+        progress=metadata.get("progress"),
         error=metadata.get("error"),
         chunk_count=metadata.get("chunk_count"),
         text_preview=metadata.get("text_preview"),
@@ -158,6 +161,7 @@ async def upload_file(file: UploadFile = File(...)):
         "size": len(content),
         "uploaded_at": datetime.utcnow().isoformat(),
         "status": "processing",
+        "progress": 0,
         "original_path": str(file_path),
         "error": None,
         "chunk_count": None,
@@ -297,7 +301,7 @@ async def reembed_file(file_id: str):
 
     # Update status
     from services.file_service import update_file_status
-    update_file_status(file_id, status="processing")
+    update_file_status(file_id, status="processing", progress=0)
 
     # Start re-embedding
     asyncio.create_task(process_file_embedding(file_id, file_path, file_type))

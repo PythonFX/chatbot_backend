@@ -3,34 +3,24 @@ import json
 import sqlite3
 import numpy as np
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 import re
-from dataclasses import dataclass, field
 
 import faiss
-import pdfplumber
+import fitz  # PyMuPDF for PDF text extraction
 from docx import Document
 
 # Ollama embedding configuration - qwen3-embedding-4b outputs 2560-dim vectors
 EMBEDDING_DIM = 2560  # Will be verified when first embedding is received
 
+# Sentence delimiters for chunking
+SENTENCE_DELIMITERS = r"(?<=[。！？.!?])\s*"
+# Maximum characters in a single chunk (independent chunks are used for sentences exceeding this)
+MAX_CHUNK_SIZE = 400
 
-@dataclass
-class PDFElement:
-    """Represents a element in a PDF document."""
-    type: Literal["heading", "paragraph", "list_item", "table"]
-    text: str
-    level: int = 0  # heading level (1-6), 0 for non-headings
-    font_size: float = 0
-    page_num: int = 0
-
-
-@dataclass
-class PDFSection:
-    """Represents a section with heading and its content."""
-    heading: Optional[PDFElement] = None
-    content: list[PDFElement] = field(default_factory=list)
-    children: list["PDFSection"] = field(default_factory=list)
+# Testing flag - limits PDF processing to first N pages when True
+TESTING = True
+TESTING_MAX_PAGES = 5
 
 # Directory paths
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -93,11 +83,10 @@ def _extract_text_from_file(file_path: Path, file_type: str) -> str:
     text = ""
 
     if file_type == "pdf":
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+        with fitz.open(file_path) as doc:
+            max_pages = TESTING_MAX_PAGES if TESTING else len(doc)
+            for page in doc[:max_pages]:
+                text += page.get_text() + "\n"
 
     elif file_type in ("doc", "docx"):
         doc = Document(file_path)
@@ -116,314 +105,60 @@ def _extract_text_from_file(file_path: Path, file_type: str) -> str:
     return text.strip()
 
 
-def _is_heading_line(line_text: str, font_size: float, prev_font_size: float,
-                      line_bold: bool, all_font_sizes: list[float]) -> bool:
-    """Determine if a line is a heading based on multiple signals."""
-    if not line_text.strip():
-        return False
-
-    # Skip very short lines (likely noise)
-    if len(line_text.strip()) < 2:
-        return False
-
-    # Skip lines that are mostly numbers or punctuation
-    alpha_ratio = sum(c.isalpha() for c in line_text) / max(len(line_text), 1)
-    if alpha_ratio < 0.3:
-        return False
-
-    # Heading indicators:
-    # 1. Font size is larger than median font size in document
-    median_size = sorted(all_font_sizes)[len(all_font_sizes) // 2] if all_font_sizes else 12
-    # 2. Font size is notably larger than previous line
-    # 3. Text is bold
-    # 4. Line is short (headings tend to be shorter than paragraphs)
-    is_large_font = font_size > median_size * 1.2 if median_size else font_size > 14
-    is_significantly_larger = font_size > prev_font_size * 1.3 if prev_font_size > 0 else False
-    is_short_line = len(line_text.strip()) < 100
-    is_bold = line_bold
-
-    # Count heading-like keywords at start
-    heading_keywords = [
-        "第", "章", "节", "条", "款", "项", "目",
-        "chapter", "section", "article", "part",
-        "概述", "简介", "前言", "摘要", "目录",
-        "定义", "原理", "方法", "步骤", "流程",
-        "总结", "结论", "参考", "附录",
-    ]
-    starts_with_keyword = any(line_text.strip().startswith(kw) for kw in heading_keywords)
-
-    score = 0
-    if is_large_font:
-        score += 2
-    if is_significantly_larger:
-        score += 2
-    if is_bold:
-        score += 1
-    if is_short_line:
-        score += 1
-    if starts_with_keyword:
-        score += 3
-
-    return score >= 3
-
-
-def _extract_pdf_with_structure(file_path: Path) -> list[PDFElement]:
-    """
-    Extract text from PDF while preserving heading structure.
-    Uses font size analysis to identify headings at different levels.
-    """
-    elements: list[PDFElement] = []
-
-    with pdfplumber.open(file_path) as pdf:
-        all_font_sizes: list[float] = []
-
-        # First pass: collect all font sizes
-        for page in pdf.pages:
-            chars = page.chars
-            for char in chars:
-                if char.get("size", 0) > 0:
-                    all_font_sizes.append(char["size"])
-
-        if not all_font_sizes:
-            # Fallback to plain text extraction
-            return [_extract_pdf_plain_text(file_path)]
-
-        # Second pass: extract elements with structure
-        prev_element: Optional[PDFElement] = None
-
-        for page_num, page in enumerate(pdf.pages, start=1):
-            # Use chars to reconstruct lines with font info
-            chars = page.chars
-            if not chars:
-                continue
-
-            # Group chars by vertical position (y coordinate) to get lines
-            from collections import defaultdict
-            y_groups: dict[float, list] = defaultdict(list)
-
-            for char in chars:
-                top = round(char.get("top", 0), 1)
-                y_groups[top].append(char)
-
-            # Sort by vertical position (top to bottom)
-            sorted_ys = sorted(y_groups.keys())
-
-            for y in sorted_ys:
-                line_chars = sorted(y_groups[y], key=lambda c: c.get("x0", 0))
-
-                # Detect and inject spaces where needed
-                line_text = _reconstruct_line_text(line_chars)
-
-                if not line_text:
-                    continue
-
-                # Get font properties for this line
-                font_sizes = [c.get("size", 0) for c in line_chars if c.get("size", 0) > 0]
-                font_size = max(font_sizes) if font_sizes else 0
-
-                # Check if bold (many PDFs don't expose this clearly)
-                # Use font name as proxy
-                font_names = [c.get("fontname", "").lower() for c in line_chars]
-                is_bold = any("bold" in fn or "heavy" in fn for fn in font_names)
-
-                prev_font_size = prev_element.font_size if prev_element else 0
-
-                # Determine if this is a heading
-                if _is_heading_line(line_text, font_size, prev_font_size, is_bold, all_font_sizes):
-                    # Determine heading level based on font size relative to median
-                    median_size = sorted(all_font_sizes)[len(all_font_sizes) // 2]
-                    size_ratio = font_size / median_size if median_size > 0 else 1.0
-
-                    if size_ratio >= 2.0:
-                        level = 1
-                    elif size_ratio >= 1.5:
-                        level = 2
-                    elif size_ratio >= 1.2:
-                        level = 3
-                    else:
-                        level = 4
-
-                    elements.append(PDFElement(
-                        type="heading",
-                        text=line_text,
-                        level=level,
-                        font_size=font_size,
-                        page_num=page_num
-                    ))
-                else:
-                    elements.append(PDFElement(
-                        type="paragraph",
-                        text=line_text,
-                        level=0,
-                        font_size=font_size,
-                        page_num=page_num
-                    ))
-
-                prev_element = elements[-1]
-
-    # Post-process: merge consecutive paragraphs and clean up
-    return elements
-
-
-def _reconstruct_line_text(line_chars: list[dict]) -> str:
-    """
-    Reconstruct text from a line of PDF characters.
-    Detects and injects missing spaces between words.
-    """
-    if not line_chars:
-        return ""
-
-    # Sort by x position
-    sorted_chars = sorted(line_chars, key=lambda c: c.get("x0", 0))
-    text_parts = []
-
-    for i, char in enumerate(sorted_chars):
-        char_text = char.get("text", "")
-        if not char_text:
-            continue
-
-        text_parts.append(char_text)
-
-        # Check if we need to inject a space after this char
-        if i < len(sorted_chars) - 1:
-            next_char = sorted_chars[i + 1]
-            gap = next_char.get("x0", 0) - char.get("x1", 0)
-
-            # Get font sizes for gap check
-            curr_size = char.get("size", 0)
-            next_size = next_char.get("size", 0)
-
-            # If gap is significant (> 0.3 * char width) and not already a space
-            # AND both chars have similar font sizes (same text block)
-            if gap > 0 and curr_size > 0 and next_size > 0:
-                # Estimate character width from font size
-                avg_size = (curr_size + next_size) / 2
-                char_width = avg_size * 0.6  # rough estimate
-
-                # If gap is larger than ~30% of estimated char width, inject space
-                if gap > char_width * 0.3:
-                    # Only inject if the next char doesn't already have a leading space
-                    # and it's not punctuation (which naturally has spacing)
-                    next_text = next_char.get("text", "")
-                    if next_text not in " \t\n.,;:!?。！？、；：""''（）【】":
-                        text_parts.append(" ")
-
-    return "".join(text_parts)
-
-
-def _extract_pdf_plain_text(file_path: Path) -> PDFElement:
-    """Fallback: simple PDF text extraction."""
-    text = ""
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return PDFElement(type="paragraph", text=text.strip(), page_num=1)
-
-
-def _chunk_text_by_structure(elements: list[PDFElement],
-                              chunk_size: int = 400,
-                              overlap: int = 50) -> list[str]:
-    """
-    Chunk elements while respecting heading and sentence boundaries.
-    Never cuts a sentence or word in half.
-    """
-    if not elements:
-        return []
-
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_size = 0
-    heading_context: list[str] = []
-
-    def get_heading_prefix() -> str:
-        if not heading_context:
-            return ""
-        return " > ".join(heading_context[-2:]) + ": "
-
-    def flush_chunk() -> None:
-        nonlocal current_chunk, current_size
-        if current_chunk:
-            prefix = get_heading_prefix()
-            chunk_text = prefix + " ".join(current_chunk)
-            chunks.append(chunk_text.strip())
-            current_chunk = []
-            current_size = 0
-
-    def add_text_to_chunk(text: str) -> None:
-        """Add text to current chunk. Sentences are atomic units — never split mid-sentence."""
-        nonlocal current_chunk, current_size
-
-        text = text.strip()
-        if not text:
-            return
-
-        sentences = _split_into_sentences(text)
-
-        for sent in sentences:
-            sent_len = len(sent)
-
-            if current_size + sent_len + 1 > chunk_size and current_chunk:
-                # Doesn't fit, flush and start new chunk with this sentence
-                flush_chunk()
-                current_chunk = [sent]
-                current_size = sent_len
-            else:
-                current_chunk.append(sent)
-                current_size += sent_len + 1
-
-    for element in elements:
-        text = element.text
-
-        if element.type == "heading":
-            if current_chunk:
-                flush_chunk()
-
-            level = element.level
-            heading_context = heading_context[:level - 1]
-            heading_context.append(text)
-
-            add_text_to_chunk(text)
-        else:
-            add_text_to_chunk(text)
-
-    if current_chunk:
-        flush_chunk()
-
-    return chunks
-
-
 def _split_into_sentences(text: str) -> list[str]:
     """Split text into sentences, preserving sentence-ending punctuation."""
-    sentences = re.split(r"(?<=[。！？.!?])\s*", text)
+    sentences = re.split(SENTENCE_DELIMITERS, text)
     return [s.strip() for s in sentences if s.strip()]
 
 
-def _chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> list[str]:
+def _chunk_text(text: str) -> list[str]:
     """
-    Split plain text into chunks respecting sentence boundaries.
-    Sentences are atomic — never cut mid-sentence or mid-word.
+    Split text into chunks using two-pass sentence-based chunking.
+
+    Pass 1: Identify sentences that exceed MAX_CHUNK_SIZE (independent chunks).
+    Pass 2: Build chunks, stopping when hitting an independent chunk.
+            The part before the independent chunk ends as a complete chunk.
     """
     if not text:
         return []
 
     sentences = _split_into_sentences(text)
+    if not sentences:
+        return []
+
+    # Pass 1: mark independent sentences (those exceeding MAX_CHUNK_SIZE)
+    independent_indices: set[int] = set()
+    for i, sent in enumerate(sentences):
+        if len(sent) > MAX_CHUNK_SIZE:
+            independent_indices.add(i)
+
+    # Pass 2: build chunks
     chunks: list[str] = []
     current: list[str] = []
     current_size = 0
 
-    for sent in sentences:
-        sent_len = len(sent)
-
-        if current_size + sent_len + 1 > chunk_size and current:
-            chunks.append(" ".join(current))
-            current = [sent]
-            current_size = sent_len
+    for i, sent in enumerate(sentences):
+        if i in independent_indices:
+            # Flush current chunk if any
+            if current:
+                chunks.append(" ".join(current))
+                current = []
+                current_size = 0
+            # This sentence becomes its own independent chunk
+            chunks.append(sent)
         else:
-            current.append(sent)
-            current_size += sent_len + 1
+            sent_len = len(sent)
+            # Check if adding this sentence would exceed MAX_CHUNK_SIZE
+            if current_size + sent_len + (1 if current else 0) > MAX_CHUNK_SIZE and current:
+                # Flush and start new chunk
+                chunks.append(" ".join(current))
+                current = [sent]
+                current_size = sent_len
+            else:
+                current.append(sent)
+                current_size += sent_len + (1 if len(current) > 1 else 0)
 
+    # Don't forget the last chunk
     if current:
         chunks.append(" ".join(current))
 
@@ -464,38 +199,57 @@ async def process_file_embedding(file_id: str, file_path: Path, file_type: str) 
     try:
         from services.file_service import update_file_status
 
-        update_file_status(file_id, status="processing")
+        update_file_status(file_id, status="processing", progress=0)
 
-        # Extract text and chunk based on file type
-        if file_type == "pdf":
-            # Use structure-aware extraction for PDFs
-            elements = _extract_pdf_with_structure(file_path)
-            if not elements:
-                update_file_status(file_id, status="error", error="No text content extracted")
-                return
+        # Extract text from file (all types use same extraction, then chunk)
+        text = _extract_text_from_file(file_path, file_type)
+        if not text:
+            update_file_status(file_id, status="error", error="No text content extracted")
+            return
 
-            # Build full text for preview
-            text = " ".join(e.text for e in elements if e.type == "paragraph")
-            text_preview = text[:200] + "..." if len(text) > 200 else text
-
-            # Chunk with structure awareness
-            chunks = _chunk_text_by_structure(elements)
-        else:
-            # Use plain text extraction for other file types
-            text = _extract_text_from_file(file_path, file_type)
-            if not text:
-                update_file_status(file_id, status="error", error="No text content extracted")
-                return
-
-            text_preview = text[:200] + "..." if len(text) > 200 else text
-            chunks = _chunk_text(text)
+        text_preview = text[:200] + "..." if len(text) > 200 else text
+        chunks = _chunk_text(text)
 
         if not chunks:
             update_file_status(file_id, status="error", error="Failed to chunk text")
             return
 
-        # Get embeddings
-        embeddings, embedding_dim = await _call_embedding_api(chunks)
+        # Chunking complete — 10%
+        update_file_status(file_id, status="processing", progress=10)
+
+        # Embed chunks one by one to track progress
+        # 10% to 95% is distributed across chunks (85% total)
+        import httpx
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        model = os.getenv("EMBEDDING_MODEL", "qwen3-embedding-4b")
+        url = f"{ollama_base}/api/embeddings"
+
+        embeddings = []
+        embedding_dim = None
+        chunk_count = len(chunks)
+        progress_per_chunk = 85.0 / chunk_count if chunk_count > 0 else 0
+
+        async with httpx.AsyncClient() as client:
+            for i, chunk_text in enumerate(chunks):
+                response = await client.post(
+                    url,
+                    json={"model": model, "prompt": chunk_text},
+                    timeout=60.0,
+                )
+                if response.status_code != 200:
+                    raise Exception(f"Ollama embedding error: {response.status_code} - {response.text}")
+                data = response.json()
+                embedding = data.get("embedding", [])
+                embeddings.append(embedding)
+                if embedding_dim is None:
+                    embedding_dim = len(embedding)
+
+                # Update progress: 10% + (i+1)/chunk_count * 85%
+                prog = int(10 + (i + 1) / chunk_count * 85)
+                update_file_status(file_id, status="processing", progress=prog)
+
+        # All embeddings done — 95%, now save to disk/DB
+        update_file_status(file_id, status="processing", progress=95)
 
         # Save embeddings to disk and SQLite
         emb_dir = _get_file_embeddings_dir(file_id)
@@ -535,6 +289,7 @@ async def process_file_embedding(file_id: str, file_path: Path, file_type: str) 
         update_file_status(
             file_id,
             status="ready",
+            progress=100,
             chunk_count=len(chunks),
             text_preview=text_preview,
         )
