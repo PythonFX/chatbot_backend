@@ -21,6 +21,7 @@ from services.embedding_service import (
     load_file_embeddings,
     load_all_embeddings,
     unload_file_embeddings,
+    get_file_chunks,
 )
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -98,6 +99,25 @@ async def get_file(file_id: str):
         chunk_count=metadata.get("chunk_count"),
         text_preview=metadata.get("text_preview"),
     )
+
+
+class FileChunksResponse(BaseModel):
+    file_id: str
+    chunks: list[dict]
+
+
+@router.get("/{file_id}/chunks", response_model=FileChunksResponse)
+async def get_chunks(file_id: str):
+    """Get all chunks for a specific file."""
+    metadata = get_file_metadata(file_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if metadata.get("status") != "ready":
+        raise HTTPException(status_code=400, detail="File not ready yet")
+
+    chunks = get_file_chunks(file_id)
+    return FileChunksResponse(file_id=file_id, chunks=chunks)
 
 
 @router.post("/upload", response_model=UploadResponse)
