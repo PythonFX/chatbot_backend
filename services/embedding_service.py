@@ -545,11 +545,14 @@ async def search_chunks_in_files(query: str, file_ids: list[str], top_k: int = 5
     for row in cur.fetchall():
         if row["file_id"] not in file_chunks:
             file_chunks[row["file_id"]] = {}
-        file_chunks[row["file_id"]][row["chunk_index"]] = row["chunk_text"]
+        file_chunks[row["file_id"]][row["chunk_index"]] = {
+            "chunk_text": row["chunk_text"],
+            "chunk_index": row["chunk_index"],
+        }
 
-    # Get global index ordering
+    # Get global index ordering with chunk_index
     cur.execute("""
-        SELECT fe.file_id, fe.chunk_text
+        SELECT fe.file_id, fe.chunk_text, fe.chunk_index
         FROM file_embeddings fe
         ORDER BY ROWID
     """)
@@ -568,9 +571,11 @@ async def search_chunks_in_files(query: str, file_ids: list[str], top_k: int = 5
         if file_id not in file_ids:
             continue
 
+        chunk_index = row["chunk_index"]
         results.append({
             "file_id": file_id,
             "chunk_text": row["chunk_text"],
+            "chunk_index": chunk_index,
             "score": float(dist),
         })
 

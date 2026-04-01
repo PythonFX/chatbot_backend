@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     message: str
     resume: bool = False  # If True, resume existing stream instead of starting new one
+    deep_qa_mode: bool = False  # If True, use deep Q&A with query rewrite and essential scoring
 
 
 class ChatResponse(BaseModel):
@@ -179,7 +180,8 @@ async def chat_stream(request: ChatRequest):
 
     # Search for RAG context if conversation has linked files
     rag_chunks: list[dict] = []
-    if conversation.file_ids:
+    # For normal mode, do the search now. For deep_qa_mode, it happens inside generate()
+    if conversation.file_ids and not request.deep_qa_mode:
         print(f"[Chat] Conversation has {len(conversation.file_ids)} linked files, searching for RAG context...")
         try:
             rag_chunks = await search_chunks_in_files(
@@ -222,17 +224,61 @@ async def chat_stream(request: ChatRequest):
     # Get current title (will be updated after stream completes if first message)
     title = conversation.title
 
-    # Start the background stream (this runs independently of HTTP)
-    stream_state = stream_manager.start_stream(
-        request.conversation_id,
-        assistant_msg_id,
-        langchain_messages,
-        title=title,
-        rag_contexts=rag_chunks,
-    )
+    # For deep_qa_mode, we delay starting the stream until inside generate()
+    # so we can emit status events during deep_qa_retrieve
+    stream_state = None
 
     async def generate():
-        nonlocal title
+        nonlocal title, rag_chunks
+
+        # For deep_qa_mode, perform RAG search now and emit status events
+        if request.deep_qa_mode and conversation.file_ids:
+            print(f"[Chat] Deep Q&A mode: performing multi-step retrieval...")
+            try:
+                from services.deep_qa_service import deep_qa_retrieve, build_rag_context
+
+                # Emit processing status
+                yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'processing', 'message': 'Analyzing contexts...'})}\n\n"
+
+                # Build conversation history for query rewriting
+                history_messages = conversation.messages[:-1]  # Exclude the current user message
+                history_text = "\n".join([
+                    f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}"
+                    for m in history_messages
+                ])
+
+                final_query, selected_contexts = await deep_qa_retrieve(
+                    query=request.message,
+                    file_ids=conversation.file_ids,
+                    conversation_history=history_text,
+                    initial_top_k=10
+                )
+
+                # Emit done status
+                yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'done', 'message': 'Analysis complete'})}\n\n"
+
+                if selected_contexts:
+                    rag_context = build_rag_context(selected_contexts)
+                    rag_system_msg = SystemMessage(
+                        content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
+                    )
+                    langchain_messages.insert(-1, rag_system_msg)
+                    rag_chunks = selected_contexts
+                    print(f"[Chat] Deep Q&A: selected {len(rag_chunks)} contexts")
+                else:
+                    print(f"[Chat] Deep Q&A: no relevant contexts found")
+            except Exception as e:
+                print(f"[Chat] Deep Q&A error: {e}")
+                yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'error', 'message': str(e)})}\n\n"
+
+        # Start the background stream (this runs independently of HTTP)
+        stream_state = stream_manager.start_stream(
+            request.conversation_id,
+            assistant_msg_id,
+            langchain_messages,
+            title=title,
+            rag_contexts=rag_chunks,
+        )
 
         yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
 
