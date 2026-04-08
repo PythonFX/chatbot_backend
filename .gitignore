@@ -1,3 +1,6 @@
+.omc/
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
