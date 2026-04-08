@@ -8,9 +8,33 @@ load_dotenv()
 
 app = FastAPI(title="Chatbot API", version="1.0.0")
 
+_local_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+# Support LAN access: dynamically add any host IP on the 192.168.x.x subnet
+_lan_origins = []
+for prefix in ("192.168", "10.0", "172.17"):
+    try:
+        import socket
+        hostname = socket.gethostname()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        if local_ip.startswith(prefix):
+            _lan_origins.append(f"http://{local_ip}:5173")
+            _lan_origins.append(f"http://{local_ip}:3000")
+    except Exception:
+        pass
+
+all_origins = _local_origins + _lan_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=all_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
