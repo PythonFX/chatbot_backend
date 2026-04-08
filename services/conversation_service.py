@@ -64,6 +64,30 @@ def update_title(conversation_id: str, title: str) -> Optional[Conversation]:
     return conversation
 
 
+def set_novel_agent(conversation_id: str, is_novel_agent: bool) -> Optional[Conversation]:
+    """Enable or disable novel_agent mode for a conversation."""
+    conversation = get_conversation(conversation_id)
+    if not conversation:
+        return None
+    conversation.is_novel_agent = is_novel_agent
+    if not is_novel_agent:
+        conversation.selected_novel_id = None
+    conversation.updated_at = datetime.utcnow()
+    _save_conversation(conversation)
+    return conversation
+
+
+def set_selected_novel(conversation_id: str, novel_id: str) -> Optional[Conversation]:
+    """Set the selected novel for a conversation."""
+    conversation = get_conversation(conversation_id)
+    if not conversation:
+        return None
+    conversation.selected_novel_id = novel_id
+    conversation.updated_at = datetime.utcnow()
+    _save_conversation(conversation)
+    return conversation
+
+
 def update_file_ids(conversation_id: str, file_ids: list[str]) -> Optional[Conversation]:
     """Update the linked file IDs of a conversation."""
     conversation = get_conversation(conversation_id)

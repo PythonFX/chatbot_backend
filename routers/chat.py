@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from services.title_generator import generate_title
 from services.minimax_client import create_minimax_client, is_minimax_configured
 from services.stream_manager import stream_manager
 from services.embedding_service import search_chunks_in_files
+from services import novel_service
 
 
 router = APIRouter(tags=["chat"])
@@ -19,8 +21,8 @@ router = APIRouter(tags=["chat"])
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-    resume: bool = False  # If True, resume existing stream instead of starting new one
-    deep_qa_mode: bool = False  # If True, use deep Q&A with query rewrite and essential scoring
+    resume: bool = False
+    deep_qa_mode: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -45,12 +47,10 @@ class RegenerateResponse(BaseModel):
     type: str | None = None
 
 
-# Track stop events per conversation (legacy, kept for compatibility)
 stop_events: dict[str, asyncio.Event] = {}
 
 
 def _build_langchain_messages(messages: list) -> list:
-    """Convert our message format to LangChain message format."""
     langchain_messages = []
     for m in messages:
         if m.role == "user":
@@ -62,14 +62,28 @@ def _build_langchain_messages(messages: list) -> list:
     return langchain_messages
 
 
+def _build_novel_system_message(novel_data: dict) -> SystemMessage:
+    """Format selected novel data into a system message for the LLM."""
+    chapters_lines = "\n".join(
+        f"{c['index']}. {c['title']}" for c in novel_data["chapters"]
+    )
+    inspiration_str = json.dumps(novel_data.get("inspiration") or {}, ensure_ascii=False, indent=2)
+    return SystemMessage(
+        content=f"""你正在使用小说参考资料进行创作分析。
+当前参考小说：《{novel_data["title"]}》
+
+【章节列表】
+{chapters_lines}
+
+【灵感分析（inspiration.json）】
+{inspiration_str}
+
+请结合上述参考内容进行创作。请先阅读章节列表和灵感分析，然后在后续对话中依据这些内容回答用户的问题或提供创作建议。"""
+    )
+
+
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """
-    Send a message and stream AI response using Server-Sent Events.
-
-    The LLM stream runs in a background task that persists even if the
-    HTTP connection is closed. Chunks are saved to JSON in real-time.
-    """
     if not is_minimax_configured():
         return StreamingResponse(
             iter([json.dumps({"type": "error", "error": "MiniMax not configured"})]),
@@ -77,7 +91,6 @@ async def chat_stream(request: ChatRequest):
             status_code=500,
         )
 
-    # Get conversation
     conversation = conversation_service.get_conversation(request.conversation_id)
     if not conversation:
         return StreamingResponse(
@@ -86,7 +99,7 @@ async def chat_stream(request: ChatRequest):
             status_code=404,
         )
 
-    # Handle resume mode: re-subscribe to an existing stream (must be before empty message check)
+    # ── Resume mode ──────────────────────────────────────────────────────────
     if request.resume:
         existing_state = stream_manager.get_stream(request.conversation_id)
         if not existing_state:
@@ -100,7 +113,6 @@ async def chat_stream(request: ChatRequest):
 
         async def generate_resume():
             try:
-                # Send start event first
                 start_data = {
                     'type': 'start',
                     'message_id': existing_state.assistant_msg_id,
@@ -108,7 +120,6 @@ async def chat_stream(request: ChatRequest):
                 }
                 yield f"data: {json.dumps(start_data)}\n\n"
 
-                # Send accumulated content as first chunk(s) if any
                 if existing_state.full_text:
                     yield f"data: {json.dumps({'type': 'chunk', 'text': existing_state.full_text})}\n\n"
                 if existing_state.full_thinking:
@@ -116,7 +127,6 @@ async def chat_stream(request: ChatRequest):
 
                 while True:
                     if existing_state.is_complete and len(existing_state.chunks) == 0:
-                        # Stream is done and no more chunks
                         done_data = {'type': 'done', 'message_id': existing_state.assistant_msg_id, 'title': existing_state.title}
                         yield f"data: {json.dumps(done_data)}\n\n"
                         return
@@ -124,7 +134,6 @@ async def chat_stream(request: ChatRequest):
                     chunks = await stream_manager.wait_for_chunks(existing_state, timeout=60.0)
                     for chunk in chunks:
                         if chunk["type"] == "done":
-                            # Drain any remaining chunks before exiting
                             continue
                         elif chunk["type"] == "stopped":
                             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
@@ -148,7 +157,7 @@ async def chat_stream(request: ChatRequest):
             },
         )
 
-    # Non-resume requests require a message
+    # ── Non-resume: require a message ────────────────────────────────────────
     if not request.message.strip():
         return StreamingResponse(
             iter([json.dumps({"type": "error", "error": "Empty message"})]),
@@ -156,14 +165,84 @@ async def chat_stream(request: ChatRequest):
             status_code=400,
         )
 
-    # Cancel any ongoing generation for this conversation
     if request.conversation_id in stop_events:
         stop_events[request.conversation_id].set()
-
-    # Create stop event for this conversation
     stop_events[request.conversation_id] = asyncio.Event()
 
-    # Add user message
+    msg_text = request.message.strip()
+
+    # ── Novel agent flow ───────────────────────────────────────────────────────
+    is_novel = conversation.is_novel_agent
+    is_selecting_book = is_novel and conversation.selected_novel_id is None
+
+    # 1) User typed /novel → enter novel agent mode, list books
+    if msg_text == "/novel":
+        conversation_service.set_novel_agent(request.conversation_id, True)
+        novels = novel_service.list_novels()
+
+        async def generate_book_list():
+            yield f"data: {json.dumps({'type': 'novel_books', 'books': novels})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'message_id': '', 'title': conversation.title})}\n\n"
+
+        return StreamingResponse(
+            generate_book_list(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # 2) User sent a number → book selection
+    if is_selecting_book and re.fullmatch(r"\d+", msg_text):
+        idx = int(msg_text)
+        novels = novel_service.list_novels()
+        if idx < 1 or idx > len(novels):
+            async def generate_error():
+                yield f"data: {json.dumps({'type': 'error', 'error': f'Invalid selection. Please enter a number between 1 and {len(novels)}.'})}\n\n"
+
+            return StreamingResponse(
+                generate_error(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        selected_novel = novels[idx - 1]
+        novel_data = novel_service.load_novel(selected_novel["id"])
+        conversation_service.set_selected_novel(request.conversation_id, selected_novel["id"])
+
+        # Save chapters + inspiration as an assistant message
+        chapters_lines = "\n".join(f"{c['index']}. {c['title']}" for c in novel_data["chapters"])
+        inspiration_str = json.dumps(novel_data.get("inspiration") or {}, ensure_ascii=False, indent=2)
+        msg_content = (
+            f"**【参考小说：《{novel_data['title']}》】**\n\n"
+            f"**Chapters**\n{chapters_lines}\n\n"
+            f"**Inspiration**\n```json\n{inspiration_str}\n```"
+        )
+        conversation_service.add_message(
+            request.conversation_id, "assistant", msg_content, type="novel_selected"
+        )
+
+        async def generate_selected():
+            yield f"data: {json.dumps({'type': 'novel_selected', 'book': novel_data})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'message_id': '', 'title': conversation.title})}\n\n"
+
+        return StreamingResponse(
+            generate_selected(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── Normal chat ───────────────────────────────────────────────────────────
     result = conversation_service.add_message(
         request.conversation_id, "user", request.message
     )
@@ -175,12 +254,17 @@ async def chat_stream(request: ChatRequest):
         )
     conversation, user_msg = result
 
-    # Build messages for LLM
     langchain_messages = _build_langchain_messages(conversation.messages)
 
-    # Search for RAG context if conversation has linked files
+    # Inject novel context for active novel agent conversations
+    if is_novel and conversation.selected_novel_id:
+        novel_data = novel_service.load_novel(conversation.selected_novel_id)
+        if novel_data:
+            novel_sys_msg = _build_novel_system_message(novel_data)
+            langchain_messages.insert(-1, novel_sys_msg)
+
+    # RAG context
     rag_chunks: list[dict] = []
-    # For normal mode, do the search now. For deep_qa_mode, it happens inside generate()
     if conversation.file_ids and not request.deep_qa_mode:
         print(f"[Chat] Conversation has {len(conversation.file_ids)} linked files, searching for RAG context...")
         try:
@@ -197,15 +281,12 @@ async def chat_stream(request: ChatRequest):
                 rag_system_msg = SystemMessage(
                     content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
                 )
-                # Insert RAG context as second-to-last position (before user message)
                 langchain_messages.insert(-1, rag_system_msg)
                 print(f"[Chat] Added {len(rag_chunks)} RAG chunks to context")
-            else:
-                print(f"[Chat] No relevant chunks found in linked files")
         except Exception as e:
             print(f"[Chat] RAG search error: {e}")
 
-    # Create assistant message placeholder with complete=False
+    # Create assistant placeholder
     placeholder_result = conversation_service.add_message(
         request.conversation_id,
         "assistant",
@@ -220,28 +301,21 @@ async def chat_stream(request: ChatRequest):
         )
     _, placeholder_msg = placeholder_result
     assistant_msg_id = placeholder_msg.id
-
-    # Get current title (will be updated after stream completes if first message)
     title = conversation.title
-
-    # For deep_qa_mode, we delay starting the stream until inside generate()
-    # so we can emit status events during deep_qa_retrieve
     stream_state = None
 
     async def generate():
         nonlocal title, rag_chunks
 
-        # For deep_qa_mode, perform RAG search now and emit status events
+        # Deep Q&A mode
         if request.deep_qa_mode and conversation.file_ids:
             print(f"[Chat] Deep Q&A mode: performing multi-step retrieval...")
             try:
                 from services.deep_qa_service import deep_qa_retrieve, build_rag_context
 
-                # Emit processing status
                 yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'processing', 'message': 'Analyzing contexts...'})}\n\n"
 
-                # Build conversation history for query rewriting
-                history_messages = conversation.messages[:-1]  # Exclude the current user message
+                history_messages = conversation.messages[:-1]
                 history_text = "\n".join([
                     f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}"
                     for m in history_messages
@@ -254,7 +328,6 @@ async def chat_stream(request: ChatRequest):
                     initial_top_k=10
                 )
 
-                # Emit done status
                 yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'done', 'message': 'Analysis complete'})}\n\n"
 
                 if selected_contexts:
@@ -271,7 +344,9 @@ async def chat_stream(request: ChatRequest):
                 print(f"[Chat] Deep Q&A error: {e}")
                 yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'error', 'message': str(e)})}\n\n"
 
-        # Start the background stream (this runs independently of HTTP)
+        # Re-fetch conversation in case it was updated by novel_service calls above
+        conversation = conversation_service.get_conversation(request.conversation_id)
+
         stream_state = stream_manager.start_stream(
             request.conversation_id,
             assistant_msg_id,
@@ -283,18 +358,14 @@ async def chat_stream(request: ChatRequest):
         yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
 
         try:
-            # Wait for chunks from the background stream
             while True:
-                # Check if stream is already complete
                 if stream_state.is_complete and len(stream_state.chunks) == 0:
                     break
 
-                # Wait for new chunks
                 chunks = await stream_manager.wait_for_chunks(stream_state, timeout=60.0)
 
                 for chunk in chunks:
                     if chunk["type"] == "done":
-                        # Generate title after stream completes (only for first message)
                         if len(conversation.messages) == 1 and conversation.title == "New Chat":
                             print(f"[Title] Starting title generation after stream for: {request.message[:50]}...")
 
@@ -325,16 +396,13 @@ async def chat_stream(request: ChatRequest):
                     elif chunk["type"] == "thinking":
                         yield f"data: {json.dumps({'type': 'thinking', 'thinking': chunk['thinking']})}\n\n"
 
-                    # Small yield to prevent blocking
                     await asyncio.sleep(0)
 
         except asyncio.CancelledError:
-            # HTTP connection was closed, but the background stream continues!
             print(f"[Chat] HTTP connection closed, background stream continues for: {request.conversation_id}")
             raise
 
         finally:
-            # Don't clean up the stream - let it run in background
             if request.conversation_id in stop_events:
                 del stop_events[request.conversation_id]
 
@@ -351,11 +419,7 @@ async def chat_stream(request: ChatRequest):
 
 @router.post("/chat/stop/{conversation_id}")
 async def stop_generation(conversation_id: str):
-    """Stop ongoing generation for a conversation."""
-    # Stop the background stream
     stream_manager.stop_stream(conversation_id)
-
-    # Legacy support
     if conversation_id in stop_events:
         stop_events[conversation_id].set()
         return {"status": "cancelled", "conversation_id": conversation_id}
@@ -364,7 +428,6 @@ async def stop_generation(conversation_id: str):
 
 @router.post("/chat/regenerate", response_model=RegenerateResponse)
 async def regenerate_response(request: RegenerateRequest):
-    """Regenerate the AI response for a given user message ID (non-streaming)."""
     if not is_minimax_configured():
         raise HTTPException(status_code=500, detail="MiniMax not configured")
 
@@ -372,7 +435,6 @@ async def regenerate_response(request: RegenerateRequest):
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Find the user message
     user_msg = None
     user_msg_index = -1
     for i, m in enumerate(conversation.messages):
@@ -384,21 +446,25 @@ async def regenerate_response(request: RegenerateRequest):
     if not user_msg:
         raise HTTPException(status_code=404, detail="User message not found")
 
-    # Find the corresponding assistant message (should be immediately after)
     assistant_msg = None
     if user_msg_index + 1 < len(conversation.messages):
         next_msg = conversation.messages[user_msg_index + 1]
         if next_msg.role == "assistant":
             assistant_msg = next_msg
 
-    # Build messages up to and including the user message
     langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1])
+
+    # Inject novel context if in novel agent mode with a selected novel
+    if conversation.is_novel_agent and conversation.selected_novel_id:
+        novel_data = novel_service.load_novel(conversation.selected_novel_id)
+        if novel_data:
+            novel_sys_msg = _build_novel_system_message(novel_data)
+            langchain_messages.insert(-1, novel_sys_msg)
 
     try:
         llm = create_minimax_client()
         response = await asyncio.to_thread(llm.invoke, langchain_messages)
 
-        # Parse the response
         full_text = ""
         thinking = None
         if hasattr(response, "content"):
@@ -414,11 +480,9 @@ async def regenerate_response(request: RegenerateRequest):
     if not full_text:
         raise HTTPException(status_code=500, detail="Empty response from MiniMax")
 
-    # Remove old assistant message if exists
     if assistant_msg:
         conversation_service.remove_message(request.conversation_id, assistant_msg.id)
 
-    # Add new AI response
     result = conversation_service.add_message(
         request.conversation_id,
         "assistant",
@@ -441,7 +505,6 @@ async def regenerate_response(request: RegenerateRequest):
 
 
 def _parse_minimax_chunk(chunk) -> dict:
-    """Parse a MiniMax streaming chunk and extract relevant info."""
     result = {"text": "", "thinking": None}
 
     if hasattr(chunk, "content"):

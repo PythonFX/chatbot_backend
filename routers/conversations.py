@@ -8,6 +8,35 @@ from services.conversation_service import SearchResult
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
+def _build_message_responses(messages) -> list:
+    return [
+        MessageResponse(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            created_at=m.created_at.isoformat(),
+            thinking=m.thinking,
+            type=m.type,
+            complete=m.complete,
+            rag_contexts=m.rag_contexts,
+        )
+        for m in messages
+    ]
+
+
+def _build_conv_response(conv) -> dict:
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "messages": _build_message_responses(conv.messages),
+        "file_ids": conv.file_ids,
+        "created_at": conv.created_at.isoformat(),
+        "updated_at": conv.updated_at.isoformat(),
+        "is_novel_agent": conv.is_novel_agent,
+        "selected_novel_id": conv.selected_novel_id,
+    }
+
+
 class CreateConversationResponse(BaseModel):
     id: str
     title: str
@@ -56,6 +85,8 @@ class ConversationResponse(BaseModel):
     file_ids: list[str] = []
     created_at: str
     updated_at: str
+    is_novel_agent: bool = False
+    selected_novel_id: Optional[str] = None
 
 
 class UpdateFilesRequest(BaseModel):
@@ -66,28 +97,7 @@ class UpdateFilesRequest(BaseModel):
 async def list_conversations():
     """List all conversations, newest first."""
     conversations = conversation_service.get_all_conversations()
-    return [
-        ConversationResponse(
-            id=c.id,
-            title=c.title,
-            messages=[
-                MessageResponse(
-                    id=m.id,
-                    role=m.role,
-                    content=m.content,
-                    created_at=m.created_at.isoformat(),
-                    thinking=m.thinking,
-                    type=m.type,
-                    complete=m.complete,
-                    rag_contexts=m.rag_contexts,
-                )
-                for m in c.messages
-            ],
-            created_at=c.created_at.isoformat(),
-            updated_at=c.updated_at.isoformat(),
-        )
-        for c in conversations
-    ]
+    return [ConversationResponse(**_build_conv_response(c)) for c in conversations]
 
 
 @router.post("", response_model=CreateConversationResponse)
@@ -102,12 +112,7 @@ async def search_conversations(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(50, ge=1, le=200, description="Max results to return"),
 ):
-    """
-    Search all messages across all conversations.
-    Returns matches with surrounding context, excluding thinking content.
-    """
     results = conversation_service.search_messages(q, context_length=50)
-    # Apply limit
     limited_results = results[:limit]
     return SearchResponse(
         query=q,
@@ -133,25 +138,7 @@ async def get_conversation(conversation_id: str):
     conversation = conversation_service.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return ConversationResponse(
-        id=conversation.id,
-        title=conversation.title,
-        messages=[
-            MessageResponse(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=m.created_at.isoformat(),
-                thinking=m.thinking,
-                type=m.type,
-                complete=m.complete,
-            )
-            for m in conversation.messages
-        ],
-        file_ids=conversation.file_ids,
-        created_at=conversation.created_at.isoformat(),
-        updated_at=conversation.updated_at.isoformat(),
-    )
+    return ConversationResponse(**_build_conv_response(conversation))
 
 
 @router.patch("/{conversation_id}/title", response_model=ConversationResponse)
@@ -160,25 +147,7 @@ async def rename_conversation(conversation_id: str, body: RenameRequest):
     conversation = conversation_service.update_title(conversation_id, body.title)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return ConversationResponse(
-        id=conversation.id,
-        title=conversation.title,
-        messages=[
-            MessageResponse(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=m.created_at.isoformat(),
-                thinking=m.thinking,
-                type=m.type,
-                complete=m.complete,
-            )
-            for m in conversation.messages
-        ],
-        file_ids=conversation.file_ids,
-        created_at=conversation.created_at.isoformat(),
-        updated_at=conversation.updated_at.isoformat(),
-    )
+    return ConversationResponse(**_build_conv_response(conversation))
 
 
 @router.delete("/{conversation_id}")
@@ -195,25 +164,7 @@ async def update_conversation_files(conversation_id: str, body: UpdateFilesReque
     conversation = conversation_service.update_file_ids(conversation_id, body.file_ids)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return ConversationResponse(
-        id=conversation.id,
-        title=conversation.title,
-        messages=[
-            MessageResponse(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=m.created_at.isoformat(),
-                thinking=m.thinking,
-                type=m.type,
-                complete=m.complete,
-            )
-            for m in conversation.messages
-        ],
-        file_ids=conversation.file_ids,
-        created_at=conversation.created_at.isoformat(),
-        updated_at=conversation.updated_at.isoformat(),
-    )
+    return ConversationResponse(**_build_conv_response(conversation))
 
 
 @router.post("/{conversation_id}/auto-rename", response_model=ConversationResponse)
@@ -223,7 +174,6 @@ async def auto_rename_conversation(conversation_id: str):
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Find the first user message
     first_user_message = None
     for msg in conversation.messages:
         if msg.role == "user":
@@ -233,33 +183,12 @@ async def auto_rename_conversation(conversation_id: str):
     if not first_user_message:
         raise HTTPException(status_code=400, detail="No user message found to generate title from")
 
-    # Generate title using LLM
     new_title = generate_title(first_user_message)
-
-    # Update the conversation title
     updated = conversation_service.update_title(conversation_id, new_title)
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update title")
 
-    return ConversationResponse(
-        id=updated.id,
-        title=updated.title,
-        messages=[
-            MessageResponse(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=m.created_at.isoformat(),
-                thinking=m.thinking,
-                type=m.type,
-                complete=m.complete,
-            )
-            for m in updated.messages
-        ],
-        file_ids=updated.file_ids,
-        created_at=updated.created_at.isoformat(),
-        updated_at=updated.updated_at.isoformat(),
-    )
+    return ConversationResponse(**_build_conv_response(updated))
 
 
 class RagContextsResponse(BaseModel):
