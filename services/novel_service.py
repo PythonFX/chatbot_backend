@@ -71,6 +71,16 @@ def load_novel(novel_id: str) -> Optional[dict]:
 
     chapters.sort(key=lambda c: c["index"])
 
+    # Load analysis.json if present (shown before inspiration)
+    analysis_path = folder / "analysis.json"
+    analysis = None
+    if analysis_path.exists():
+        try:
+            with open(analysis_path, encoding="utf-8") as f:
+                analysis = json.load(f)
+        except Exception:
+            pass
+
     # Load inspiration.json if present
     inspiration_path = folder / "inspiration.json"
     inspiration = None
@@ -85,5 +95,6 @@ def load_novel(novel_id: str) -> Optional[dict]:
         "id": novel_id,
         "title": folder.name,
         "chapters": chapters,
+        "analysis": analysis,
         "inspiration": inspiration,
     }

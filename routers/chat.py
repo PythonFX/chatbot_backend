@@ -215,15 +215,22 @@ async def chat_stream(request: ChatRequest):
         selected_novel = novels[idx - 1]
         novel_data = novel_service.load_novel(selected_novel["id"])
         conversation_service.set_selected_novel(request.conversation_id, selected_novel["id"])
+        conversation_service.update_title(request.conversation_id, selected_novel["title"])
 
-        # Save chapters + inspiration as an assistant message
+        # Save chapters + analysis + inspiration as an assistant message
         chapters_lines = "\n".join(f"{c['index']}. {c['title']}" for c in novel_data["chapters"])
-        inspiration_str = json.dumps(novel_data.get("inspiration") or {}, ensure_ascii=False, indent=2)
         msg_content = (
             f"**【参考小说：《{novel_data['title']}》】**\n\n"
             f"**Chapters**\n{chapters_lines}\n\n"
-            f"**Inspiration**\n```json\n{inspiration_str}\n```"
         )
+        if novel_data.get("analysis"):
+            analysis_str = json.dumps(novel_data["analysis"], ensure_ascii=False, indent=2)
+            msg_content += f"**Analysis**\n```json\n{analysis_str}\n```\n\n"
+        if novel_data.get("inspiration"):
+            inspiration_str = json.dumps(novel_data["inspiration"], ensure_ascii=False, indent=2)
+            msg_content += f"**Inspiration**\n```json\n{inspiration_str}\n```"
+        else:
+            msg_content = msg_content.rstrip()
         conversation_service.add_message(
             request.conversation_id, "assistant", msg_content, type="novel_selected"
         )
