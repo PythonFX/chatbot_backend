@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from services import conversation_service
-from services.minimax_client import create_minimax_client
+from services.llm_factory import create_llm_client
 from services.title_generator import generate_title
 
 
@@ -86,29 +86,26 @@ class StreamManager:
         Background task that continuously receives chunks from LLM.
         This runs independently of any HTTP connection.
         """
-        llm = create_minimax_client()
+        llm = create_llm_client()
         full_text = ""
         full_thinking = ""
 
         try:
             print(f"[StreamManager] Beginning LLM stream for: {state.conversation_id}")
-            async for chunk in llm.astream(messages):
+            async for parsed in llm.astream(messages):
                 if state.stop_event.is_set():
                     print(f"[StreamManager] Stop event detected for: {state.conversation_id}")
                     break
 
-                parsed = _parse_chunk(chunk)
-
                 # Update thinking if present
-                if parsed["thinking"]:
+                if parsed.get("thinking"):
                     full_thinking += parsed["thinking"]
                     conversation_service.append_chunk(
                         state.conversation_id,
                         state.assistant_msg_id,
-                        text="",  # Don't append text again
+                        text="",
                         thinking=parsed["thinking"],
                     )
-                    # Notify waiting HTTP generators
                     state.chunks.append({
                         "type": "thinking",
                         "thinking": parsed["thinking"],
@@ -116,26 +113,23 @@ class StreamManager:
                     state.event.set()
 
                 # Update text if present
-                if parsed["text"]:
+                if parsed.get("text"):
                     full_text += parsed["text"]
                     conversation_service.append_chunk(
                         state.conversation_id,
                         state.assistant_msg_id,
                         text=parsed["text"],
-                        thinking="",  # Don't update thinking
+                        thinking="",
                     )
-                    # Also update full accumulated values in state
                     state.full_text = full_text
                     state.full_thinking = full_thinking
 
-                    # Notify waiting HTTP generators
                     state.chunks.append({
                         "type": "chunk",
                         "text": parsed["text"],
                     })
                     state.event.set()
 
-                # Small yield to allow other coroutines to run
                 await asyncio.sleep(0)
 
             # Stream completed normally
@@ -143,7 +137,6 @@ class StreamManager:
             state.full_text = full_text
             state.full_thinking = full_thinking
 
-            # Mark message as complete
             conversation_service.update_message(
                 state.conversation_id,
                 state.assistant_msg_id,
@@ -153,17 +146,14 @@ class StreamManager:
                 rag_contexts=state.rag_contexts,
             )
 
-            # Notify waiting generators of completion
             state.chunks.append({"type": "done"})
             state.event.set()
 
             print(f"[StreamManager] Stream complete for: {state.conversation_id} ({len(full_text)} chars)")
 
         except asyncio.CancelledError:
-            # This background task was cancelled (e.g., stop was called)
             print(f"[StreamManager] Stream cancelled for: {state.conversation_id}")
             state.is_complete = True
-            # Save partial content
             conversation_service.update_message(
                 state.conversation_id,
                 state.assistant_msg_id,
@@ -210,30 +200,6 @@ class StreamManager:
         """Clean up stream state after it's no longer needed."""
         if conversation_id in self._streams:
             del self._streams[conversation_id]
-
-
-def _parse_chunk(chunk) -> dict:
-    """Parse a MiniMax streaming chunk."""
-    result = {"text": "", "thinking": None}
-
-    if hasattr(chunk, "content"):
-        content = chunk.content
-        if isinstance(content, list):
-            for block in content:
-                if hasattr(block, "type"):
-                    if block.type == "thinking" and hasattr(block, "thinking"):
-                        result["thinking"] = block.thinking
-                    elif block.type == "text" and hasattr(block, "text"):
-                        result["text"] += block.text
-                elif isinstance(block, dict):
-                    if block.get("type") == "thinking":
-                        result["thinking"] = block.get("thinking")
-                    elif block.get("type") == "text":
-                        result["text"] += block.get("text", "")
-        elif isinstance(content, str):
-            result["text"] = content
-
-    return result
 
 
 # Global stream manager instance

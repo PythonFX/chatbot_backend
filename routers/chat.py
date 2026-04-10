@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from services import conversation_service
 from services.conversation_service import save_conversation
 from services.title_generator import generate_title
-from services.minimax_client import create_minimax_client, is_minimax_configured
+from services.llm_factory import create_llm_client, is_llm_configured
 from services.stream_manager import stream_manager
 from services.embedding_service import search_chunks_in_files
 from services import novel_service
@@ -84,7 +84,7 @@ def _build_novel_system_message(novel_data: dict) -> SystemMessage:
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    if not is_minimax_configured():
+    if not is_llm_configured():
         return StreamingResponse(
             iter([json.dumps({"type": "error", "error": "MiniMax not configured"})]),
             media_type="application/json",
@@ -435,7 +435,7 @@ async def stop_generation(conversation_id: str):
 
 @router.post("/chat/regenerate", response_model=RegenerateResponse)
 async def regenerate_response(request: RegenerateRequest):
-    if not is_minimax_configured():
+    if not is_llm_configured():
         raise HTTPException(status_code=500, detail="MiniMax not configured")
 
     conversation = conversation_service.get_conversation(request.conversation_id)
@@ -469,15 +469,11 @@ async def regenerate_response(request: RegenerateRequest):
             langchain_messages.insert(-1, novel_sys_msg)
 
     try:
-        llm = create_minimax_client()
-        response = await asyncio.to_thread(llm.invoke, langchain_messages)
+        llm = create_llm_client()
+        response = await llm.invoke(langchain_messages)
 
-        full_text = ""
-        thinking = None
-        if hasattr(response, "content"):
-            parsed = _parse_minimax_chunk(type("Chunk", (), {"content": response.content})())
-            full_text = parsed["text"]
-            thinking = parsed["thinking"]
+        full_text = response.get("text", "")
+        thinking = response.get("thinking")
 
     except asyncio.CancelledError:
         raise HTTPException(status_code=499, detail="Generation cancelled")
@@ -511,24 +507,3 @@ async def regenerate_response(request: RegenerateRequest):
     )
 
 
-def _parse_minimax_chunk(chunk) -> dict:
-    result = {"text": "", "thinking": None}
-
-    if hasattr(chunk, "content"):
-        content = chunk.content
-        if isinstance(content, list):
-            for block in content:
-                if hasattr(block, "type"):
-                    if block.type == "thinking" and hasattr(block, "thinking"):
-                        result["thinking"] = block.thinking
-                    elif block.type == "text" and hasattr(block, "text"):
-                        result["text"] += block.text
-                elif isinstance(block, dict):
-                    if block.get("type") == "thinking":
-                        result["thinking"] = block.get("thinking")
-                    elif block.get("type") == "text":
-                        result["text"] += block.get("text", "")
-        elif isinstance(content, str):
-            result["text"] = content
-
-    return result

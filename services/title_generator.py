@@ -1,5 +1,5 @@
 from langchain_core.messages import HumanMessage, SystemMessage
-from services.minimax_client import create_minimax_client
+from services.llm_factory import create_llm_client
 
 
 def generate_title(first_message: str) -> str:
@@ -7,44 +7,20 @@ def generate_title(first_message: str) -> str:
     if not first_message.strip():
         return "New Chat"
 
-    # If message is very short, use it directly as title
     cleaned = first_message.strip()
     if len(cleaned) <= 20:
         return cleaned[:50] if cleaned else "New Chat"
 
     try:
-        print(f"[TitleGenerator] Calling MiniMax for: {first_message[:30]}...")
-        llm = create_minimax_client()
-
-        # Disable thinking to speed up title generation
-        llm = llm.with_config({"thinking": {"type": "disabled"}})
+        print(f"[TitleGenerator] Calling LLM for: {first_message[:30]}...")
+        llm = create_llm_client()
 
         response = llm.invoke([
             SystemMessage(content="You are a title generator. Given a user's first message to a chatbot, generate a very short title (3-5 words max) that summarizes what the conversation is about. Only respond with the title, nothing else."),
             HumanMessage(content=first_message),
         ])
-        print(f"[TitleGenerator] Raw response: {response}")
-        print(f"[TitleGenerator] Response content: {response.content}")
 
-        # Extract text from response.content which may be a list of blocks
-        content = response.content
-        if isinstance(content, list):
-            title = ""
-            for block in content:
-                if hasattr(block, "type") and block.type == "text" and hasattr(block, "text"):
-                    title = block.text
-                    break
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    title = block.get("text", "")
-                    break
-        else:
-            title = content
-
-        if not title:
-            return "New Chat"
-
-        title = str(title).strip()
-        # Remove quotes if present
+        title = response.get("text", "").strip()
         title = title.strip('"\'')
         result = title[:50] if title else "New Chat"
         print(f"[TitleGenerator] Final title: {result}")

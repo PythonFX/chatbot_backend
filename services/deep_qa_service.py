@@ -14,7 +14,7 @@ import re
 from typing import Optional
 
 from services.embedding_service import get_file_chunks
-from services.minimax_client import create_minimax_client
+from services.llm_factory import create_llm_client
 
 
 LLM_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "200000"))
@@ -24,20 +24,21 @@ MAX_CONTEXT_CHARS = LLM_CONTEXT_WINDOW * CHARS_PER_TOKEN
 
 
 def _extract_text_from_response(response) -> str:
-    """Extract text string from LangChain LLM response."""
+    """Extract text string from LLM invoke response (dict with text/thinking keys)."""
+    if isinstance(response, dict):
+        return response.get("text", "")
     if hasattr(response, "content"):
         content = response.content
         if isinstance(content, str):
             return content
         elif isinstance(content, list):
-            # Content is a list of content blocks
             text_parts = []
             for block in content:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
                     elif block.get("type") == "thinking":
-                        pass  # Skip thinking blocks
+                        pass
                 elif isinstance(block, str):
                     text_parts.append(block)
             return "".join(text_parts)
@@ -85,9 +86,9 @@ Respond in JSON format only, without any markdown or explanation:
 """
 
     try:
-        llm = create_minimax_client()
+        llm = create_llm_client()
         from langchain_core.messages import HumanMessage
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        response = await llm.invoke([HumanMessage(content=prompt)])
 
         content = _extract_text_from_response(response)
         # Extract JSON from response
@@ -215,9 +216,9 @@ From here starts the query and the contexts, for each piece of context, it start
 """
 
     try:
-        llm = create_minimax_client()
+        llm = create_llm_client()
         from langchain_core.messages import HumanMessage
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        response = await llm.invoke([HumanMessage(content=prompt)])
 
         content = _extract_text_from_response(response)
 
