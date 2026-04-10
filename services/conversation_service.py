@@ -1,14 +1,14 @@
 from __future__ import annotations
-import os
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 from models.conversation import Conversation, Message
+from services import db_service
 
 
-DATA_DIR = Path(os.environ.get("CONVERSATIONS_DATA_DIR", Path(__file__).parent.parent / "data" / "conversations"))
+DATA_DIR = Path(__file__).parent.parent / "data" / "conversations"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -16,87 +16,84 @@ def _get_file_path(conversation_id: str) -> Path:
     return DATA_DIR / f"{conversation_id}.json"
 
 
-def get_all_conversations() -> list[Conversation]:
-    """Get all conversations, ordered by updated_at descending."""
-    conversations = []
-    for file_path in DATA_DIR.glob("*.json"):
-        try:
-            with open(file_path, encoding="utf-8") as f:
-                data = json.load(f)
-            conversations.append(Conversation.from_dict(data))
-        except Exception:
-            continue
-    conversations.sort(key=lambda c: c.updated_at, reverse=True)
-    return conversations
-
-
-def get_conversation(conversation_id: str) -> Optional[Conversation]:
-    """Get a single conversation by ID."""
-    file_path = _get_file_path(conversation_id)
-    if not file_path.exists():
-        return None
-    with open(file_path, encoding="utf-8") as f:
-        data = json.load(f)
-    return Conversation.from_dict(data)
-
-
-def create_conversation() -> Conversation:
-    """Create a new empty conversation."""
-    conversation = Conversation()
-    _save_conversation(conversation)
-    return conversation
-
-
-def _save_conversation(conversation: Conversation) -> None:
-    """Save a conversation to disk."""
+def _save_conversation_to_json(conversation: Conversation) -> None:
     with open(_get_file_path(conversation.id), "w", encoding="utf-8") as f:
         json.dump(conversation.to_dict(), f, indent=2, ensure_ascii=False)
 
 
+def _write_json_safe(conversation: Conversation) -> None:
+    try:
+        _save_conversation_to_json(conversation)
+    except Exception as e:
+        print(f"[WARN] Failed to write JSON backup for {conversation.id}: {e}")
+
+
+def _persist(conversation: Conversation) -> None:
+    """Write to DB and JSON backup. Call after every mutation."""
+    db_service.db_upsert_conversation(conversation.to_dict())
+    _write_json_safe(conversation)
+
+
+def get_all_conversations() -> list[Conversation]:
+    convs = db_service.db_get_all_conversations()
+    return [Conversation.from_dict(c) for c in convs]
+
+
+def get_conversation(conversation_id: str) -> Optional[Conversation]:
+    conv = db_service.db_get_conversation(conversation_id)
+    if conv is not None:
+        return Conversation.from_dict(conv)
+    return None
+
+
+def create_conversation() -> Conversation:
+    conv = Conversation()
+    conv.created_at = datetime.utcnow()
+    conv.updated_at = conv.created_at
+    _persist(conv)
+    return conv
+
+
 def update_title(conversation_id: str, title: str) -> Optional[Conversation]:
-    """Update the title of a conversation."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    conv = get_conversation(conversation_id)
+    if not conv:
         return None
-    conversation.title = title.strip()[:100] or "New Chat"
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
-    return conversation
+    conv.title = title.strip()[:100] or "New Chat"
+    conv.updated_at = datetime.utcnow()
+    _persist(conv)
+    return conv
 
 
 def set_novel_agent(conversation_id: str, is_novel_agent: bool) -> Optional[Conversation]:
-    """Enable or disable novel_agent mode for a conversation."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    conv = get_conversation(conversation_id)
+    if not conv:
         return None
-    conversation.is_novel_agent = is_novel_agent
+    conv.is_novel_agent = is_novel_agent
     if not is_novel_agent:
-        conversation.selected_novel_id = None
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
-    return conversation
+        conv.selected_novel_id = None
+    conv.updated_at = datetime.utcnow()
+    _persist(conv)
+    return conv
 
 
 def set_selected_novel(conversation_id: str, novel_id: str) -> Optional[Conversation]:
-    """Set the selected novel for a conversation."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    conv = get_conversation(conversation_id)
+    if not conv:
         return None
-    conversation.selected_novel_id = novel_id
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
-    return conversation
+    conv.selected_novel_id = novel_id
+    conv.updated_at = datetime.utcnow()
+    _persist(conv)
+    return conv
 
 
 def update_file_ids(conversation_id: str, file_ids: list[str]) -> Optional[Conversation]:
-    """Update the linked file IDs of a conversation."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    conv = get_conversation(conversation_id)
+    if not conv:
         return None
-    conversation.file_ids = file_ids
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
-    return conversation
+    conv.file_ids = file_ids
+    conv.updated_at = datetime.utcnow()
+    _persist(conv)
+    return conv
 
 
 def add_message(
@@ -109,15 +106,15 @@ def add_message(
     raw_response: Optional[dict] = None,
     complete: bool = True,
 ) -> Optional[Tuple[Conversation, Message]]:
-    """Add a message to a conversation."""
     if content is None:
         raise ValueError("Message content cannot be None")
 
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    conv = get_conversation(conversation_id)
+    if not conv:
         return None
 
-    message = Message(
+    now = datetime.utcnow()
+    msg = Message(
         role=str(role),
         content=str(content),
         thinking=thinking,
@@ -126,32 +123,36 @@ def add_message(
         raw_response=raw_response,
         complete=complete,
     )
-    conversation.messages.append(message)
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
-    return conversation, message
+    msg.created_at = now
+    conv.messages.append(msg)
+    conv.updated_at = now
+
+    db_service.db_add_message(
+        msg.id, conversation_id, msg.role, msg.content, msg.thinking,
+        msg.signature, msg.type, msg.raw_response, msg.complete,
+        msg.rag_contexts, msg.created_at.isoformat(),
+    )
+    _write_json_safe(conv)
+    return conv, msg
 
 
 def delete_conversation(conversation_id: str) -> bool:
-    """Delete a conversation."""
-    file_path = _get_file_path(conversation_id)
-    if not file_path.exists():
-        return False
-    file_path.unlink()
-    return True
+    db_ok = db_service.db_delete_conversation(conversation_id)
+    fp = _get_file_path(conversation_id)
+    json_ok = fp.exists() and fp.unlink()
+    return db_ok or json_ok
 
 
 def remove_message(conversation_id: str, message_id: str) -> bool:
-    """Remove a message from a conversation by message ID."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    db_service.db_remove_message(message_id)
+    conv = get_conversation(conversation_id)
+    if not conv:
         return False
-
-    for i, m in enumerate(conversation.messages):
+    for i, m in enumerate(conv.messages):
         if m.id == message_id:
-            conversation.messages.pop(i)
-            conversation.updated_at = datetime.utcnow()
-            _save_conversation(conversation)
+            conv.messages.pop(i)
+            conv.updated_at = datetime.utcnow()
+            _persist(conv)
             return True
     return False
 
@@ -164,12 +165,24 @@ def update_message(
     complete: Optional[bool] = None,
     rag_contexts: Optional[list[dict]] = None,
 ) -> Optional[Message]:
-    """Update a message's content, thinking, complete status, or rag_contexts."""
-    conversation = get_conversation(conversation_id)
-    if not conversation:
+    fields = {}
+    if content is not None:
+        fields["content"] = content
+    if thinking is not None:
+        fields["thinking"] = thinking
+    if complete is not None:
+        fields["complete"] = complete
+    if rag_contexts is not None:
+        fields["rag_contexts"] = rag_contexts
+    if not fields:
         return None
 
-    for m in conversation.messages:
+    db_service.db_update_message(message_id, **fields)
+
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
         if m.id == message_id:
             if content is not None:
                 m.content = content
@@ -179,8 +192,8 @@ def update_message(
                 m.complete = complete
             if rag_contexts is not None:
                 m.rag_contexts = rag_contexts
-            conversation.updated_at = datetime.utcnow()
-            _save_conversation(conversation)
+            conv.updated_at = datetime.utcnow()
+            _persist(conv)
             return m
     return None
 
@@ -191,104 +204,41 @@ def append_chunk(
     text: str = "",
     thinking: str = "",
 ) -> Optional[Message]:
-    """
-    Append content to a message's content/thinking fields.
-    Used by stream_manager to incrementally update messages.
-    """
-    conversation = get_conversation(conversation_id)
-    if not conversation:
-        return None
+    """Append content to a message's content/thinking fields. Writes to both DB and JSON."""
+    db_service.db_append_chunk(message_id, text, thinking)
 
-    for m in conversation.messages:
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
         if m.id == message_id:
             if text:
                 m.content += text
             if thinking:
-                if m.thinking:
-                    m.thinking += thinking
-                else:
-                    m.thinking = thinking
-            # Note: don't update updated_at on every chunk to reduce disk writes
-            # Only update on meaningful boundaries
-            _save_conversation(conversation)
+                m.thinking = (m.thinking or "") + thinking
+            _write_json_safe(conv)
             return m
     return None
 
 
 def save_conversation(conversation: Conversation) -> None:
-    """Public method to save a conversation."""
-    conversation.updated_at = datetime.utcnow()
-    _save_conversation(conversation)
+    _persist(conversation)
 
 
 @dataclass
 class SearchResult:
-    """Represents a single search match in a message."""
     conversation_id: str
     conversation_title: str
     message_id: str
     role: str
-    context_before: str  # Text before the match
-    matched_text: str    # The matching text
-    context_after: str   # Text after the match
-    full_context: str     # Combined context with match highlighted (for display)
+    context_before: str
+    matched_text: str
+    context_after: str
+    full_context: str
 
 
 def search_messages(query: str, context_length: int = 50) -> list[SearchResult]:
-    """
-    Search all messages across all conversations for a query string.
-    Returns matches with surrounding context, excluding thinking content.
-
-    Args:
-        query: The search string to find (case-insensitive)
-        context_length: Number of characters to show before/after match
-
-    Returns:
-        List of SearchResult objects with surrounding context
-    """
-    if not query or len(query.strip()) == 0:
+    if not query or not query.strip():
         return []
-
-    query_lower = query.lower()
-    results: list[SearchResult] = []
-
-    conversations = get_all_conversations()
-    for conv in conversations:
-        for msg in conv.messages:
-            # Skip thinking content as per requirement
-            content = msg.content
-            if not content:
-                continue
-
-            content_lower = content.lower()
-            pos = content_lower.find(query_lower)
-            if pos == -1:
-                continue
-
-            # Extract surrounding context
-            start = max(0, pos - context_length)
-            end = min(len(content), pos + len(query) + context_length)
-
-            context_before = content[start:pos]
-            matched_text = content[pos:pos + len(query)]
-            context_after = content[pos + len(query):end]
-
-            # Add ellipsis if there are more characters before/after
-            prefix = "..." if start > 0 else ""
-            suffix = "..." if end < len(content) else ""
-
-            # Build full context for display (single line)
-            full_context = f"{prefix}{context_before}{matched_text}{context_after}{suffix}"
-
-            results.append(SearchResult(
-                conversation_id=conv.id,
-                conversation_title=conv.title,
-                message_id=msg.id,
-                role=msg.role,
-                context_before=context_before,
-                matched_text=matched_text,
-                context_after=context_after,
-                full_context=full_context,
-            ))
-
-    return results
+    results = db_service.db_search_messages(query, context_length)
+    return [SearchResult(**r) for r in results]

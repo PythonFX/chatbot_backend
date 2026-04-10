@@ -4,8 +4,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from routers import conversations, chat, files
+from services.db_service import init_db
 
 load_dotenv()
+init_db()
 
 app = FastAPI(title="Chatbot API", version="1.0.0")
 
