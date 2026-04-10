@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from models.conversation import Conversation, Message
 
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "conversations"
+DATA_DIR = Path(os.environ.get("CONVERSATIONS_DATA_DIR", Path(__file__).parent.parent / "data" / "conversations"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
