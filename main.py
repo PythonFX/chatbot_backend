@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from routers import conversations, chat, files
 
 load_dotenv()
@@ -48,6 +49,22 @@ app.include_router(files.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+class ModelSwitchRequest(BaseModel):
+    model: str
+
+
+# In-memory model state
+_current_model = "minimax-m2.7"  # default
+
+
+@app.post("/model/switch")
+async def switch_model(req: ModelSwitchRequest):
+    global _current_model
+    print(f"[Model] Switched to: {req.model} (was: {_current_model})")
+    _current_model = req.model
+    return {"status": "ok", "model": req.model}
 
 
 if __name__ == "__main__":
