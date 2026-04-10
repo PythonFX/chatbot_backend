@@ -373,7 +373,8 @@ async def chat_stream(request: ChatRequest):
 
                 for chunk in chunks:
                     if chunk["type"] == "done":
-                        if len(conversation.messages) == 1 and conversation.title == "New Chat":
+                        conversation = conversation_service.get_conversation(request.conversation_id)
+                        if conversation and len(conversation.messages) > 1 and conversation.title == "New Chat":
                             print(f"[Title] Starting title generation after stream for: {request.message[:50]}...")
 
                             def run_title_gen():
