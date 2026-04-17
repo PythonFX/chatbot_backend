@@ -130,7 +130,8 @@ def add_message(
     db_service.db_add_message(
         msg.id, conversation_id, msg.role, msg.content, msg.thinking,
         msg.signature, msg.type, msg.raw_response, msg.complete,
-        msg.rag_contexts, msg.created_at.isoformat(),
+        msg.rag_contexts, msg.versions, msg.selected_version_index,
+        msg.created_at.isoformat(),
     )
     _write_json_safe(conv)
     return conv, msg
@@ -219,6 +220,78 @@ def append_chunk(
             _write_json_safe(conv)
             return m
     return None
+
+
+def add_version(
+    conversation_id: str,
+    message_id: str,
+    content: str,
+    thinking: Optional[str],
+) -> Optional[Message]:
+    """Append a new version dict to the message's versions list. Sets selected_version_index to the new index."""
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
+        if m.id == message_id:
+            if m.versions is None:
+                m.versions = []
+            m.versions.append({
+                "content": content,
+                "thinking": thinking,
+                "created_at": datetime.utcnow().isoformat(),
+            })
+            m.selected_version_index = len(m.versions) - 1
+            conv.updated_at = datetime.utcnow()
+            _persist(conv)
+            db_service.db_update_message(
+                message_id,
+                versions=m.versions,
+                selected_version_index=m.selected_version_index,
+            )
+            return m
+    return None
+
+
+def select_version(
+    conversation_id: str,
+    message_id: str,
+    version_index: int,
+) -> Optional[Message]:
+    """Set selected_version_index to the given value."""
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
+        if m.id == message_id:
+            if m.versions is None or not (0 <= version_index < len(m.versions)):
+                return None
+            m.selected_version_index = version_index
+            conv.updated_at = datetime.utcnow()
+            _persist(conv)
+            db_service.db_update_message(
+                message_id,
+                selected_version_index=version_index,
+            )
+            return m
+    return None
+
+
+def get_selected_version(
+    conversation_id: str,
+    message_id: str,
+) -> Tuple[str, Optional[str]]:
+    """Return (content, thinking) of the selected version, or primary fields if none selected."""
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return "", None
+    for m in conv.messages:
+        if m.id == message_id:
+            if m.selected_version_index is not None and m.versions:
+                v = m.versions[m.selected_version_index]
+                return v["content"], v.get("thinking")
+            return m.content, m.thinking
+    return "", None
 
 
 def save_conversation(conversation: Conversation) -> None:

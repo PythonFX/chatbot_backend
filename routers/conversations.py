@@ -19,6 +19,8 @@ def _build_message_responses(messages) -> list:
             type=m.type,
             complete=m.complete,
             rag_contexts=m.rag_contexts,
+            versions=m.versions,
+            selected_version_index=m.selected_version_index,
         )
         for m in messages
     ]
@@ -76,6 +78,8 @@ class MessageResponse(BaseModel):
     type: str | None = None
     complete: bool = True
     rag_contexts: list[dict] | None = None
+    versions: list[dict] | None = None
+    selected_version_index: int | None = None
 
 
 class ConversationResponse(BaseModel):
@@ -213,6 +217,8 @@ async def get_message_rag_contexts(conversation_id: str, message_id: str):
                 conversation_id=conversation_id,
                 message_id=message_id,
                 rag_contexts=m.rag_contexts,
+            versions=m.versions,
+            selected_version_index=m.selected_version_index,
             )
 
     raise HTTPException(status_code=404, detail="Message not found")

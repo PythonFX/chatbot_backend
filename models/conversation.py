@@ -19,6 +19,10 @@ class Message(BaseModel):
     complete: bool = True
     # RAG contexts used for this message (list of {file_id, chunk_text, score})
     rag_contexts: Optional[list[dict]] = None
+    # Versioning for AI message responses
+    versions: Optional[list[dict]] = None
+    # Index into versions of selected version; null means primary content/thinking is selected
+    selected_version_index: Optional[int] = None
 
     def to_dict(self) -> dict:
         result = {
@@ -38,6 +42,10 @@ class Message(BaseModel):
         result["complete"] = self.complete
         if self.rag_contexts:
             result["rag_contexts"] = self.rag_contexts
+        if self.versions:
+            result["versions"] = self.versions
+        if self.selected_version_index is not None:
+            result["selected_version_index"] = self.selected_version_index
         return result
 
     @classmethod
@@ -53,6 +61,8 @@ class Message(BaseModel):
             raw_response=data.get("raw_response"),
             complete=data.get("complete", True),
             rag_contexts=data.get("rag_contexts"),
+            versions=data.get("versions"),
+            selected_version_index=data.get("selected_version_index"),
         )
 
 

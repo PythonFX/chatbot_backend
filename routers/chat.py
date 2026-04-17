@@ -45,18 +45,39 @@ class RegenerateResponse(BaseModel):
     content: str
     thinking: str | None = None
     type: str | None = None
+    total_versions: int = 0
+
+
+class SelectVersionRequest(BaseModel):
+    conversation_id: str
+    version_index: int
+
+
+class SelectVersionResponse(BaseModel):
+    message_id: str
+    content: str
+    thinking: Optional[str] = None
+    selected_version_index: int
+
+
+class GenerateVersionResponse(BaseModel):
+    message_id: str
+    content: str
+    thinking: Optional[str] = None
+    total_versions: int
 
 
 stop_events: dict[str, asyncio.Event] = {}
 
 
-def _build_langchain_messages(messages: list) -> list:
+def _build_langchain_messages(messages: list, conversation_id: str = "") -> list:
     langchain_messages = []
     for m in messages:
         if m.role == "user":
             langchain_messages.append(HumanMessage(content=m.content))
         elif m.role == "assistant":
-            langchain_messages.append(AIMessage(content=m.content))
+            content, _ = conversation_service.get_selected_version(conversation_id, m.id)
+            langchain_messages.append(AIMessage(content=content))
         elif m.role == "system":
             langchain_messages.append(SystemMessage(content=m.content))
     return langchain_messages
@@ -261,7 +282,7 @@ async def chat_stream(request: ChatRequest):
         )
     conversation, user_msg = result
 
-    langchain_messages = _build_langchain_messages(conversation.messages)
+    langchain_messages = _build_langchain_messages(conversation.messages, request.conversation_id)
 
     # Inject novel context for active novel agent conversations
     if is_novel and conversation.selected_novel_id:
@@ -460,7 +481,15 @@ async def regenerate_response(request: RegenerateRequest):
         if next_msg.role == "assistant":
             assistant_msg = next_msg
 
-    langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1])
+    if assistant_msg:
+        conversation_service.add_version(
+            request.conversation_id,
+            assistant_msg.id,
+            assistant_msg.content,
+            assistant_msg.thinking,
+        )
+
+    langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1], request.conversation_id)
 
     # Inject novel context if in novel agent mode with a selected novel
     if conversation.is_novel_agent and conversation.selected_novel_id:
@@ -484,9 +513,6 @@ async def regenerate_response(request: RegenerateRequest):
     if not full_text:
         raise HTTPException(status_code=500, detail="Empty response from MiniMax")
 
-    if assistant_msg:
-        conversation_service.remove_message(request.conversation_id, assistant_msg.id)
-
     result = conversation_service.add_message(
         request.conversation_id,
         "assistant",
@@ -499,12 +525,116 @@ async def regenerate_response(request: RegenerateRequest):
 
     _, ai_msg = result
 
+    total_versions = len(ai_msg.versions) if ai_msg.versions else 0
+
     return RegenerateResponse(
         conversation_id=request.conversation_id,
         message_id=ai_msg.id,
         content=full_text,
         thinking=thinking,
         type="text",
+        total_versions=total_versions,
     )
 
 
+@router.post("/chat/message/{message_id}/versions", response_model=GenerateVersionResponse)
+async def generate_version(message_id: str, request: ChatRequest):
+    """Generate an additional version for an existing assistant message without replacing current content."""
+    if not is_llm_configured():
+        raise HTTPException(status_code=500, detail="MiniMax not configured")
+
+    conversation = conversation_service.get_conversation(request.conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    target_msg = None
+    for m in conversation.messages:
+        if m.id == message_id and m.role == "assistant":
+            target_msg = m
+            break
+
+    if not target_msg:
+        raise HTTPException(status_code=404, detail="Assistant message not found")
+
+    # Save current primary as version[0] if no versions exist yet
+    if not target_msg.versions:
+        conversation_service.add_version(
+            request.conversation_id,
+            message_id,
+            target_msg.content,
+            target_msg.thinking,
+        )
+
+    # Build context: all messages up to and including this assistant message
+    user_msg_index = -1
+    for i, m in enumerate(conversation.messages):
+        if m.id == message_id and m.role == "assistant":
+            user_msg_index = i - 1
+            break
+    if user_msg_index < 0:
+        raise HTTPException(status_code=400, detail="Cannot find preceding user message")
+
+    langchain_messages = _build_langchain_messages(
+        conversation.messages[:user_msg_index + 1],
+        request.conversation_id,
+    )
+
+    # Inject novel/RAG context
+    if conversation.is_novel_agent and conversation.selected_novel_id:
+        novel_data = novel_service.load_novel(conversation.selected_novel_id)
+        if novel_data:
+            novel_sys_msg = _build_novel_system_message(novel_data)
+            langchain_messages.insert(-1, novel_sys_msg)
+
+    try:
+        llm = create_llm_client()
+        response = await llm.invoke(langchain_messages)
+        full_text = response.get("text", "")
+        thinking = response.get("thinking")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MiniMax error: {str(e)}")
+
+    if not full_text:
+        raise HTTPException(status_code=500, detail="Empty response")
+
+    # Append as a new version (does NOT replace primary)
+    updated_msg = conversation_service.add_version(
+        request.conversation_id,
+        message_id,
+        full_text,
+        thinking,
+    )
+    # Reset selection to primary (index 0)
+    conversation_service.select_version(request.conversation_id, message_id, 0)
+
+    total_versions = len(updated_msg.versions) if updated_msg.versions else 1
+
+    return GenerateVersionResponse(
+        message_id=message_id,
+        content=full_text,
+        thinking=thinking,
+        total_versions=total_versions,
+    )
+
+
+@router.patch("/chat/message/{message_id}/select-version", response_model=SelectVersionResponse)
+async def select_message_version(message_id: str, request: SelectVersionRequest):
+    """Update the selected version index for an assistant message."""
+    updated_msg = conversation_service.select_version(
+        request.conversation_id,
+        message_id,
+        request.version_index,
+    )
+    if not updated_msg:
+        raise HTTPException(status_code=404, detail="Message or version index not found")
+
+    content, thinking = conversation_service.get_selected_version(
+        request.conversation_id,
+        message_id,
+    )
+    return SelectVersionResponse(
+        message_id=message_id,
+        content=content,
+        thinking=thinking,
+        selected_version_index=updated_msg.selected_version_index,
+    )

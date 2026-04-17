@@ -50,10 +50,10 @@ class MiniMaxClient(LLMClientBase):
     def __init__(self, model: str | None = None):
         from langchain_anthropic import ChatAnthropic
         auth_token = os.getenv("ANTHROPIC_AUTH_TOKEN")
-        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.minimaxi.com/anthropic")
-        model = model or os.getenv("ANTHROPIC_MODEL", "mini-max-m2.7")
-        if not auth_token:
-            raise ValueError("ANTHROPIC_AUTH_TOKEN environment variable is not set")
+        base_url = os.getenv("ANTHROPIC_BASE_URL")
+        model = model or os.getenv("ANTHROPIC_MODEL")
+        if not auth_token or not model or not base_url:
+            raise ValueError("ANTHROPIC related environment variable is not set")
         self._llm = ChatAnthropic(
             model=model,
             anthropic_api_key=auth_token,
