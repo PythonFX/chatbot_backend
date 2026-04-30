@@ -130,8 +130,8 @@ def add_message(
     db_service.db_add_message(
         msg.id, conversation_id, msg.role, msg.content, msg.thinking,
         msg.signature, msg.type, msg.raw_response, msg.complete,
-        msg.rag_contexts, msg.versions, msg.selected_version_index,
-        msg.created_at.isoformat(),
+        msg.rag_contexts, msg.created_at.isoformat(),
+        msg.versions, msg.selected_version_index,
     )
     _write_json_safe(conv)
     return conv, msg

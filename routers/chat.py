@@ -1,6 +1,8 @@
 import asyncio
 import json
 import re
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
