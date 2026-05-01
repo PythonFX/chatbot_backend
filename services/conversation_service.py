@@ -256,22 +256,25 @@ def add_version(
 def select_version(
     conversation_id: str,
     message_id: str,
-    version_index: int,
+    version_index: Optional[int],
 ) -> Optional[Message]:
-    """Set selected_version_index to the given value."""
+    """Set selected_version_index to the given value. None means show primary content."""
     conv = get_conversation(conversation_id)
     if not conv:
         return None
     for m in conv.messages:
         if m.id == message_id:
-            if m.versions is None or not (0 <= version_index < len(m.versions)):
+            if version_index is None:
+                m.selected_version_index = None
+            elif m.versions is None or not (0 <= version_index < len(m.versions)):
                 return None
-            m.selected_version_index = version_index
+            else:
+                m.selected_version_index = version_index
             conv.updated_at = datetime.utcnow()
             _persist(conv)
             db_service.db_update_message(
                 message_id,
-                selected_version_index=version_index,
+                selected_version_index=m.selected_version_index,
             )
             return m
     return None

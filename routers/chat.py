@@ -52,14 +52,18 @@ class RegenerateResponse(BaseModel):
 
 class SelectVersionRequest(BaseModel):
     conversation_id: str
-    version_index: int
+    version_index: Optional[int] = None
 
 
 class SelectVersionResponse(BaseModel):
     message_id: str
     content: str
     thinking: Optional[str] = None
-    selected_version_index: int
+    selected_version_index: Optional[int] = None
+
+
+class GenerateVersionRequest(BaseModel):
+    conversation_id: str
 
 
 class GenerateVersionResponse(BaseModel):
@@ -540,7 +544,7 @@ async def regenerate_response(request: RegenerateRequest):
 
 
 @router.post("/chat/message/{message_id}/versions", response_model=GenerateVersionResponse)
-async def generate_version(message_id: str, request: ChatRequest):
+async def generate_version(message_id: str, request: GenerateVersionRequest):
     """Generate an additional version for an existing assistant message without replacing current content."""
     if not is_llm_configured():
         raise HTTPException(status_code=500, detail="MiniMax not configured")
@@ -606,8 +610,9 @@ async def generate_version(message_id: str, request: ChatRequest):
         full_text,
         thinking,
     )
-    # Reset selection to primary (index 0)
-    conversation_service.select_version(request.conversation_id, message_id, 0)
+    # Select the newly generated version (the last one)
+    new_version_index = len(updated_msg.versions) - 1
+    conversation_service.select_version(request.conversation_id, message_id, new_version_index)
 
     total_versions = len(updated_msg.versions) if updated_msg.versions else 1
 
