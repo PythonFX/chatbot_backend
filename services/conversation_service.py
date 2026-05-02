@@ -236,6 +236,7 @@ def add_version(
     content: str,
     thinking: Optional[str],
     model: Optional[str] = None,
+    is_multi_mode: bool = False,
 ) -> Optional[Message]:
     """Append a new version dict to the message's versions list. Sets selected_version_index to the new index."""
     conv = get_conversation(conversation_id)
@@ -249,6 +250,7 @@ def add_version(
                 "content": content,
                 "thinking": thinking,
                 "created_at": datetime.utcnow().isoformat(),
+                "is_multi_mode": is_multi_mode,
             }
             if model is not None:
                 version["model"] = model

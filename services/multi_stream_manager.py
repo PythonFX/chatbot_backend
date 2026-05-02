@@ -200,6 +200,7 @@ class MultiStreamManager:
                 ms.full_text,
                 ms.full_thinking,
                 model=model,
+                is_multi_mode=True,
             )
 
         # Write first model's content to primary fields for backward compatibility
