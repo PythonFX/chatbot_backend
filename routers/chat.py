@@ -693,6 +693,8 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
     # Select the newly generated version (the last one)
     new_version_index = len(updated_msg.versions) - 1
     conversation_service.select_version(request.conversation_id, message_id, new_version_index)
+    # Single-model generation clears multi-mode flag
+    conversation_service.update_message(request.conversation_id, message_id, is_multi_mode=False)
 
     total_versions = len(updated_msg.versions) if updated_msg.versions else 1
 

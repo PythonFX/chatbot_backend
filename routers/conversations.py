@@ -21,6 +21,7 @@ def _build_message_responses(messages) -> list:
             rag_contexts=m.rag_contexts,
             versions=m.versions,
             selected_version_index=m.selected_version_index,
+            is_multi_mode=m.is_multi_mode,
         )
         for m in messages
     ]
@@ -80,6 +81,7 @@ class MessageResponse(BaseModel):
     rag_contexts: list[dict] | None = None
     versions: list[dict] | None = None
     selected_version_index: int | None = None
+    is_multi_mode: bool = False
 
 
 class ConversationResponse(BaseModel):

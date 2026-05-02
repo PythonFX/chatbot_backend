@@ -168,6 +168,7 @@ def update_message(
     thinking: Optional[str] = None,
     complete: Optional[bool] = None,
     rag_contexts: Optional[list[dict]] = None,
+    is_multi_mode: Optional[bool] = None,
 ) -> Optional[Message]:
     fields = {}
     if content is not None:
@@ -178,6 +179,8 @@ def update_message(
         fields["complete"] = complete
     if rag_contexts is not None:
         fields["rag_contexts"] = rag_contexts
+    if is_multi_mode is not None:
+        fields["is_multi_mode"] = is_multi_mode
     if not fields:
         return None
 
@@ -196,6 +199,8 @@ def update_message(
                 m.complete = complete
             if rag_contexts is not None:
                 m.rag_contexts = rag_contexts
+            if is_multi_mode is not None:
+                m.is_multi_mode = is_multi_mode
             conv.updated_at = datetime.utcnow()
             _persist(conv)
             return m
