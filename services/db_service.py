@@ -92,8 +92,24 @@ def init_tables() -> None:
         conn.close()
 
 
+def _run_migrations() -> None:
+    """Add columns that may not exist in older DB schemas."""
+    conn = _get_db()
+    try:
+        # Check if is_multi_mode column exists
+        cur = conn.execute("PRAGMA table_info(messages)")
+        columns = [row["name"] for row in cur.fetchall()]
+        if "is_multi_mode" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN is_multi_mode INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+            print("[DB] Migrated: added is_multi_mode column to messages")
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     init_tables()
+    _run_migrations()
 
 
 # ── Internal upsert ────────────────────────────────────────────────────────────
