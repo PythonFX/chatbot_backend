@@ -11,8 +11,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from services import conversation_service
 from services.conversation_service import save_conversation
 from services.title_generator import generate_title
-from services.llm_factory import create_llm_client, is_llm_configured
+from services.llm_factory import create_llm_client, is_llm_configured, get_available_models, get_current_model
 from services.stream_manager import stream_manager
+from services.multi_stream_manager import multi_stream_manager
 from services.embedding_service import search_chunks_in_files
 from services import novel_service
 
@@ -25,6 +26,7 @@ class ChatRequest(BaseModel):
     message: str
     resume: bool = False
     deep_qa_mode: bool = False
+    multi_model: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -326,6 +328,7 @@ async def chat_stream(request: ChatRequest):
         "assistant",
         "",
         complete=False,
+        is_multi_mode=request.multi_model,
     )
     if not placeholder_result:
         return StreamingResponse(
@@ -381,65 +384,138 @@ async def chat_stream(request: ChatRequest):
         # Re-fetch conversation in case it was updated by novel_service calls above
         conversation = conversation_service.get_conversation(request.conversation_id)
 
-        stream_state = stream_manager.start_stream(
-            request.conversation_id,
-            assistant_msg_id,
-            langchain_messages,
-            title=title,
-            rag_contexts=rag_chunks,
-        )
+        # ── Multi-model branch ──────────────────────────────────────────────
+        if request.multi_model:
+            models = get_available_models()
+            if not models:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'No models available'})}\n\n"
+                return
 
-        yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
+            multi_state = multi_stream_manager.start_multi_stream(
+                request.conversation_id,
+                assistant_msg_id,
+                langchain_messages,
+                models=models,
+                title=title,
+                rag_contexts=rag_chunks,
+            )
 
-        try:
-            while True:
-                if stream_state.is_complete and len(stream_state.chunks) == 0:
-                    break
+            version_map = {m: i for i, m in enumerate(models)}
+            yield f"data: {json.dumps({'type': 'multi_start', 'message_id': assistant_msg_id, 'title': title, 'models': models, 'version_map': version_map})}\n\n"
 
-                chunks = await stream_manager.wait_for_chunks(stream_state, timeout=60.0)
+            try:
+                while True:
+                    if multi_state.all_complete and len(multi_state.chunks) == 0:
+                        break
 
-                for chunk in chunks:
-                    if chunk["type"] == "done":
-                        conversation = conversation_service.get_conversation(request.conversation_id)
-                        if conversation and len(conversation.messages) > 1 and conversation.title == "New Chat":
-                            print(f"[Title] Starting title generation after stream for: {request.message[:50]}...")
+                    chunks = await multi_stream_manager.wait_for_chunks(multi_state, timeout=60.0)
 
-                            def run_title_gen():
-                                return generate_title(request.message)
+                    for chunk in chunks:
+                        if chunk["type"] == "done":
+                            conversation = conversation_service.get_conversation(request.conversation_id)
+                            if conversation and len(conversation.messages) > 1 and conversation.title == "New Chat":
+                                def run_title_gen():
+                                    return generate_title(request.message)
+                                title_task = asyncio.create_task(asyncio.to_thread(run_title_gen))
+                                new_title = await title_task
+                                if new_title and new_title != "New Chat":
+                                    title = new_title
+                                    conversation_service.update_title(conversation.id, title)
 
-                            title_task = asyncio.create_task(asyncio.to_thread(run_title_gen))
-                            new_title = await title_task
-                            if new_title and new_title != "New Chat":
-                                title = new_title
-                                conversation_service.update_title(conversation.id, title)
-                                print(f"[Title] Updated after stream: {title}")
+                            yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'title': title, 'models': models})}\n\n"
+                            return
 
-                        yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'title': title})}\n\n"
-                        return
+                        elif chunk["type"] == "stopped":
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            return
 
-                    elif chunk["type"] == "stopped":
-                        yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
-                        return
+                        elif chunk["type"] == "model_done":
+                            yield f"data: {json.dumps({'type': 'model_done', 'model': chunk['model'], 'version_index': version_map[chunk['model']]})}\n\n"
 
-                    elif chunk["type"] == "error":
-                        yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error', 'Unknown error')})}\n\n"
-                        return
+                        elif chunk["type"] == "model_error":
+                            yield f"data: {json.dumps({'type': 'model_error', 'model': chunk['model'], 'error': chunk['error']})}\n\n"
 
-                    elif chunk["type"] == "chunk":
-                        yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text']})}\n\n"
+                        elif chunk["type"] == "error":
+                            yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error', 'Unknown error')})}\n\n"
+                            return
 
-                    elif chunk["type"] == "thinking":
-                        yield f"data: {json.dumps({'type': 'thinking', 'thinking': chunk['thinking']})}\n\n"
+                        elif chunk["type"] == "chunk":
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text'], 'model': chunk['model']})}\n\n"
 
-                    await asyncio.sleep(0)
+                        elif chunk["type"] == "thinking":
+                            yield f"data: {json.dumps({'type': 'thinking', 'thinking': chunk['thinking'], 'model': chunk['model']})}\n\n"
 
-        except asyncio.CancelledError:
-            print(f"[Chat] HTTP connection closed, background stream continues for: {request.conversation_id}")
-            raise
+                        await asyncio.sleep(0)
 
-        finally:
-            if request.conversation_id in stop_events:
-                del stop_events[request.conversation_id]
+            except asyncio.CancelledError:
+                print(f"[Chat] HTTP connection closed (multi), background stream continues for: {request.conversation_id}")
+                raise
+
+            finally:
+                if request.conversation_id in stop_events:
+                    del stop_events[request.conversation_id]
+
+        # ── Single-model branch ─────────────────────────────────────────────
+        else:
+            stream_state = stream_manager.start_stream(
+                request.conversation_id,
+                assistant_msg_id,
+                langchain_messages,
+                title=title,
+                rag_contexts=rag_chunks,
+            )
+
+            yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
+
+            try:
+                while True:
+                    if stream_state.is_complete and len(stream_state.chunks) == 0:
+                        break
+
+                    chunks = await stream_manager.wait_for_chunks(stream_state, timeout=60.0)
+
+                    for chunk in chunks:
+                        if chunk["type"] == "done":
+                            conversation = conversation_service.get_conversation(request.conversation_id)
+                            if conversation and len(conversation.messages) > 1 and conversation.title == "New Chat":
+                                print(f"[Title] Starting title generation after stream for: {request.message[:50]}...")
+
+                                def run_title_gen():
+                                    return generate_title(request.message)
+
+                                title_task = asyncio.create_task(asyncio.to_thread(run_title_gen))
+                                new_title = await title_task
+                                if new_title and new_title != "New Chat":
+                                    title = new_title
+                                    conversation_service.update_title(conversation.id, title)
+                                    print(f"[Title] Updated after stream: {title}")
+
+                            yield f"data: {json.dumps({'type': 'done', 'message_id': assistant_msg_id, 'title': title})}\n\n"
+                            return
+
+                        elif chunk["type"] == "stopped":
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            return
+
+                        elif chunk["type"] == "error":
+                            yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error', 'Unknown error')})}\n\n"
+                            return
+
+                        elif chunk["type"] == "chunk":
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk['text']})}\n\n"
+
+                        elif chunk["type"] == "thinking":
+                            yield f"data: {json.dumps({'type': 'thinking', 'thinking': chunk['thinking']})}\n\n"
+
+                        await asyncio.sleep(0)
+
+            except asyncio.CancelledError:
+                print(f"[Chat] HTTP connection closed, background stream continues for: {request.conversation_id}")
+                raise
+
+            finally:
+                if request.conversation_id in stop_events:
+                    del stop_events[request.conversation_id]
 
     return StreamingResponse(
         generate(),
@@ -455,6 +531,7 @@ async def chat_stream(request: ChatRequest):
 @router.post("/chat/stop/{conversation_id}")
 async def stop_generation(conversation_id: str):
     stream_manager.stop_stream(conversation_id)
+    multi_stream_manager.stop_multi_stream(conversation_id)
     if conversation_id in stop_events:
         stop_events[conversation_id].set()
         return {"status": "cancelled", "conversation_id": conversation_id}
@@ -493,6 +570,7 @@ async def regenerate_response(request: RegenerateRequest):
             assistant_msg.id,
             assistant_msg.content,
             assistant_msg.thinking,
+            model=get_current_model(),
         )
 
     langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1], request.conversation_id)
@@ -569,6 +647,7 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
             message_id,
             target_msg.content,
             target_msg.thinking,
+            model=get_current_model(),
         )
 
     # Build context: all messages up to and including this assistant message
@@ -609,6 +688,7 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
         message_id,
         full_text,
         thinking,
+        model=get_current_model(),
     )
     # Select the newly generated version (the last one)
     new_version_index = len(updated_msg.versions) - 1

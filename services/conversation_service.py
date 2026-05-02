@@ -105,6 +105,7 @@ def add_message(
     type: Optional[str] = None,
     raw_response: Optional[dict] = None,
     complete: bool = True,
+    is_multi_mode: bool = False,
 ) -> Optional[Tuple[Conversation, Message]]:
     if content is None:
         raise ValueError("Message content cannot be None")
@@ -122,6 +123,7 @@ def add_message(
         type=type,
         raw_response=raw_response,
         complete=complete,
+        is_multi_mode=is_multi_mode,
     )
     msg.created_at = now
     conv.messages.append(msg)
@@ -132,6 +134,7 @@ def add_message(
         msg.signature, msg.type, msg.raw_response, msg.complete,
         msg.rag_contexts, msg.created_at.isoformat(),
         msg.versions, msg.selected_version_index,
+        msg.is_multi_mode,
     )
     _write_json_safe(conv)
     return conv, msg
@@ -227,6 +230,7 @@ def add_version(
     message_id: str,
     content: str,
     thinking: Optional[str],
+    model: Optional[str] = None,
 ) -> Optional[Message]:
     """Append a new version dict to the message's versions list. Sets selected_version_index to the new index."""
     conv = get_conversation(conversation_id)
@@ -236,11 +240,14 @@ def add_version(
         if m.id == message_id:
             if m.versions is None:
                 m.versions = []
-            m.versions.append({
+            version = {
                 "content": content,
                 "thinking": thinking,
                 "created_at": datetime.utcnow().isoformat(),
-            })
+            }
+            if model is not None:
+                version["model"] = model
+            m.versions.append(version)
             m.selected_version_index = len(m.versions) - 1
             conv.updated_at = datetime.utcnow()
             _persist(conv)

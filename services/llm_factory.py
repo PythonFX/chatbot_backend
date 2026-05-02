@@ -78,6 +78,13 @@ def set_current_model(model: str) -> None:
     print(f"[LLMFactory] Switched to: {model} (Provider.{MODEL_TO_PROVIDER[model].value})")
 
 
+def get_model_provider(model: str) -> Provider:
+    """Return the Provider enum for a given model name."""
+    if model not in MODEL_TO_PROVIDER:
+        raise ValueError(f"Unknown model: {model}. Available: {list(MODEL_TO_PROVIDER.keys())}")
+    return MODEL_TO_PROVIDER[model]
+
+
 def get_available_models() -> list[str]:
     """Return model names whose providers are registered."""
     llm = _init_llm_client()

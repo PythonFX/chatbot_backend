@@ -48,6 +48,7 @@ def _row_to_msg(row: sqlite3.Row) -> dict:
         "rag_contexts": json.loads(row["rag_contexts"]) if row["rag_contexts"] else None,
         "versions": json.loads(row["versions"]) if row["versions"] else None,
         "selected_version_index": row["selected_version_index"],
+        "is_multi_mode": bool(row["is_multi_mode"]) if "is_multi_mode" in row.keys() else False,
         "created_at": row["created_at"],
     }
 
@@ -80,6 +81,7 @@ def init_tables() -> None:
                 rag_contexts TEXT,
                 versions TEXT,
                 selected_version_index INTEGER,
+                is_multi_mode INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
@@ -123,8 +125,8 @@ def db_add_message_raw(msg: dict) -> None:
         conn.execute("""
             INSERT OR REPLACE INTO messages
             (id, conversation_id, role, content, thinking, signature, type,
-             raw_response, complete, rag_contexts, versions, selected_version_index, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg["id"],
             msg["conversation_id"],
@@ -138,6 +140,7 @@ def db_add_message_raw(msg: dict) -> None:
             json.dumps(msg["rag_contexts"]) if msg.get("rag_contexts") else None,
             json.dumps(msg.get("versions")) if msg.get("versions") else None,
             msg.get("selected_version_index"),
+            int(msg.get("is_multi_mode", False)),
             msg["created_at"],
         ))
         conn.commit()
@@ -249,14 +252,15 @@ def db_add_message(
     created_at: str,
     versions: Optional[list] = None,
     selected_version_index: Optional[int] = None,
+    is_multi_mode: bool = False,
 ) -> dict:
     conn = _get_db()
     try:
         conn.execute("""
             INSERT INTO messages
             (id, conversation_id, role, content, thinking, signature, type,
-             raw_response, complete, rag_contexts, versions, selected_version_index, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg_id, conv_id, role, content, thinking, signature, msg_type,
             json.dumps(raw_response) if raw_response else None,
@@ -264,6 +268,7 @@ def db_add_message(
             json.dumps(rag_contexts) if rag_contexts else None,
             json.dumps(versions) if versions else None,
             selected_version_index,
+            int(is_multi_mode),
             created_at,
         ))
         conn.execute(
@@ -279,6 +284,7 @@ def db_add_message(
         "type": msg_type, "raw_response": raw_response,
         "complete": complete, "rag_contexts": rag_contexts,
         "versions": versions, "selected_version_index": selected_version_index,
+        "is_multi_mode": is_multi_mode,
         "created_at": created_at,
     }
 
@@ -304,11 +310,11 @@ def db_remove_message(msg_id: str) -> bool:
 
 
 def db_update_message(msg_id: str, **fields) -> Optional[dict]:
-    allowed = {"content", "thinking", "complete", "rag_contexts", "versions", "selected_version_index"}
+    allowed = {"content", "thinking", "complete", "rag_contexts", "versions", "selected_version_index", "is_multi_mode"}
     sets, args = [], []
     for k, v in fields.items():
         if k in allowed:
-            if k == "complete":
+            if k in ("complete", "is_multi_mode"):
                 v = int(v)
             elif k in ("rag_contexts", "versions"):
                 v = json.dumps(v) if v else None

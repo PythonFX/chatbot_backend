@@ -23,6 +23,8 @@ class Message(BaseModel):
     versions: Optional[list[dict]] = None
     # Index into versions of selected version; null means primary content/thinking is selected
     selected_version_index: Optional[int] = None
+    # Whether this message was generated in multi-model mode
+    is_multi_mode: bool = False
 
     def to_dict(self) -> dict:
         result = {
@@ -46,6 +48,8 @@ class Message(BaseModel):
             result["versions"] = self.versions
         if self.selected_version_index is not None:
             result["selected_version_index"] = self.selected_version_index
+        if self.is_multi_mode:
+            result["is_multi_mode"] = self.is_multi_mode
         return result
 
     @classmethod
@@ -63,6 +67,7 @@ class Message(BaseModel):
             rag_contexts=data.get("rag_contexts"),
             versions=data.get("versions"),
             selected_version_index=data.get("selected_version_index"),
+            is_multi_mode=data.get("is_multi_mode", False),
         )
 
 
