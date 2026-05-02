@@ -47,10 +47,6 @@ app.include_router(conversations.router)
 app.include_router(chat.router)
 app.include_router(files.router)
 
-# Register Ollama GLM-5.1 model
-from services.llm_factory import register_model, OllamaClient
-register_model("glm-5.1", OllamaClient)
-
 
 @app.get("/health")
 async def health():
@@ -63,15 +59,21 @@ class ModelSwitchRequest(BaseModel):
 
 @app.post("/model/switch")
 async def switch_model(req: ModelSwitchRequest):
-    from services.llm_factory import set_current_model, get_current_model, _registered_models
-    print(f"[Model] Switched to: {req.model} (was: {get_current_model()})")
+    from services.llm_factory import set_current_model, get_current_model, get_available_models
+    available = get_available_models()
+    if req.model not in available:
+        return {"status": "error", "error": f"Unknown model: {req.model}", "available": available}
+    old = get_current_model()
     set_current_model(req.model)
-    return {"status": "ok", "model": req.model}
+    return {"status": "ok", "model": req.model, "previous": old}
+
+
+@app.get("/model/list")
+async def list_models():
+    from services.llm_factory import get_current_model, get_available_models
+    return {"current": get_current_model(), "available": get_available_models()}
 
 
 if __name__ == "__main__":
     import uvicorn
-    # Register Ollama GLM-5.1 model on startup
-    from services.llm_factory import register_model, OllamaClient
-    register_model("glm-5.1", OllamaClient)
     uvicorn.run(app, host="0.0.0.0", port=8000)
