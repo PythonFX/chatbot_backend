@@ -75,6 +75,19 @@ class GenerateVersionResponse(BaseModel):
     total_versions: int
 
 
+class RegenerateModelRequest(BaseModel):
+    conversation_id: str
+    message_id: str
+    model: str
+
+
+class RegenerateModelResponse(BaseModel):
+    message_id: str
+    content: str
+    thinking: Optional[str] = None
+    model: str
+
+
 stop_events: dict[str, asyncio.Event] = {}
 
 
@@ -704,6 +717,164 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
     )
 
 
+@router.post("/chat/message/{message_id}/versions/stream")
+async def generate_version_stream(message_id: str, request: GenerateVersionRequest):
+    """Stream-generate a new version for an assistant message via SSE."""
+    if not is_llm_configured():
+        return StreamingResponse(
+            iter([json.dumps({"type": "error", "error": "LLM not configured"})]),
+            media_type="application/json",
+            status_code=500,
+        )
+
+    conversation = conversation_service.get_conversation(request.conversation_id)
+    if not conversation:
+        return StreamingResponse(
+            iter([json.dumps({"type": "error", "error": "Conversation not found"})]),
+            media_type="application/json",
+            status_code=404,
+        )
+
+    target_msg = None
+    for m in conversation.messages:
+        if m.id == message_id and m.role == "assistant":
+            target_msg = m
+            break
+
+    if not target_msg:
+        return StreamingResponse(
+            iter([json.dumps({"type": "error", "error": "Assistant message not found"})]),
+            media_type="application/json",
+            status_code=404,
+        )
+
+    # Save current primary as version[0] if no versions exist yet
+    if not target_msg.versions:
+        conversation_service.add_version(
+            request.conversation_id,
+            message_id,
+            target_msg.content,
+            target_msg.thinking,
+            model=get_current_model(),
+        )
+
+    # Build context: all messages up to and including this assistant message
+    user_msg_index = -1
+    for i, m in enumerate(conversation.messages):
+        if m.id == message_id and m.role == "assistant":
+            user_msg_index = i - 1
+            break
+    if user_msg_index < 0:
+        return StreamingResponse(
+            iter([json.dumps({"type": "error", "error": "Cannot find preceding user message"})]),
+            media_type="application/json",
+            status_code=400,
+        )
+
+    langchain_messages = _build_langchain_messages(
+        conversation.messages[:user_msg_index + 1],
+        request.conversation_id,
+    )
+
+    # Inject novel/RAG context
+    if conversation.is_novel_agent and conversation.selected_novel_id:
+        novel_data = novel_service.load_novel(conversation.selected_novel_id)
+        if novel_data:
+            novel_sys_msg = _build_novel_system_message(novel_data)
+            langchain_messages.insert(-1, novel_sys_msg)
+
+    # Create empty placeholder version (auto-selected by add_version)
+    updated_msg = conversation_service.add_version(
+        request.conversation_id,
+        message_id,
+        "",
+        None,
+        status="generating",
+    )
+    new_version_index = len(updated_msg.versions) - 1
+
+    async def generate():
+        yield f"data: {json.dumps({'type': 'start', 'version_index': new_version_index})}\n\n"
+
+        llm = create_llm_client()
+        full_text = ""
+        full_thinking = ""
+
+        try:
+            async for parsed in llm.astream(langchain_messages):
+                if parsed.get("thinking"):
+                    thinking_chunk = parsed["thinking"]
+                    full_thinking += thinking_chunk
+                    conversation_service.append_chunk_to_version(
+                        request.conversation_id,
+                        message_id,
+                        new_version_index,
+                        thinking=thinking_chunk,
+                    )
+                    yield f"data: {json.dumps({'type': 'thinking', 'thinking': thinking_chunk})}\n\n"
+
+                if parsed.get("text"):
+                    text_chunk = parsed["text"]
+                    full_text += text_chunk
+                    conversation_service.append_chunk_to_version(
+                        request.conversation_id,
+                        message_id,
+                        new_version_index,
+                        text=text_chunk,
+                    )
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': text_chunk})}\n\n"
+
+                await asyncio.sleep(0)
+
+            if not full_text:
+                conversation_service.update_version(
+                    request.conversation_id,
+                    message_id,
+                    new_version_index,
+                    "",
+                    full_thinking,
+                    status="error",
+                    error="Empty response from LLM",
+                )
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Empty response from LLM'})}\n\n"
+                return
+
+            # Mark as success
+            conversation_service.update_version(
+                request.conversation_id,
+                message_id,
+                new_version_index,
+                full_text,
+                full_thinking,
+                status="success",
+            )
+
+            total_versions = len(updated_msg.versions) if updated_msg.versions else 1
+            yield f"data: {json.dumps({'type': 'done', 'message_id': message_id, 'content': full_text, 'thinking': full_thinking, 'total_versions': total_versions})}\n\n"
+
+        except Exception as e:
+            conversation_service.update_version(
+                request.conversation_id,
+                message_id,
+                new_version_index,
+                full_text,
+                full_thinking,
+                status="error",
+                error=str(e),
+            )
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.patch("/chat/message/{message_id}/select-version", response_model=SelectVersionResponse)
 async def select_message_version(message_id: str, request: SelectVersionRequest):
     """Update the selected version index for an assistant message."""
@@ -724,4 +895,121 @@ async def select_message_version(message_id: str, request: SelectVersionRequest)
         content=content,
         thinking=thinking,
         selected_version_index=updated_msg.selected_version_index,
+    )
+
+
+@router.post("/chat/regenerate-model", response_model=RegenerateModelResponse)
+async def regenerate_model(request: RegenerateModelRequest):
+    """Re-generate a single failed model response for a multi-model assistant message."""
+    if not is_llm_configured(request.model):
+        raise HTTPException(status_code=500, detail=f"Model {request.model} not configured")
+
+    conversation = conversation_service.get_conversation(request.conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Find the assistant message
+    assistant_msg = None
+    assistant_idx = -1
+    for i, m in enumerate(conversation.messages):
+        if m.id == request.message_id and m.role == "assistant":
+            assistant_msg = m
+            assistant_idx = i
+            break
+
+    if not assistant_msg:
+        raise HTTPException(status_code=404, detail="Assistant message not found")
+
+    # Find preceding user message
+    user_msg = None
+    for i in range(assistant_idx - 1, -1, -1):
+        if conversation.messages[i].role == "user":
+            user_msg = conversation.messages[i]
+            break
+
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="No preceding user message found")
+
+    # Build context up to and including the user message
+    langchain_messages = _build_langchain_messages(
+        conversation.messages[:assistant_idx],
+        request.conversation_id,
+    )
+
+    # Inject novel context if in novel agent mode
+    if conversation.is_novel_agent and conversation.selected_novel_id:
+        novel_data = novel_service.load_novel(conversation.selected_novel_id)
+        if novel_data:
+            novel_sys_msg = _build_novel_system_message(novel_data)
+            langchain_messages.insert(-1, novel_sys_msg)
+
+    # RAG context
+    if conversation.file_ids:
+        try:
+            rag_chunks = await search_chunks_in_files(
+                query=user_msg.content,
+                file_ids=conversation.file_ids,
+                top_k=5,
+            )
+            if rag_chunks:
+                context_parts = []
+                for i, chunk in enumerate(rag_chunks):
+                    context_parts.append(f"[Context {i+1}] {chunk['chunk_text']}")
+                rag_context = "\n\n".join(context_parts)
+                rag_system_msg = SystemMessage(
+                    content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
+                )
+                langchain_messages.insert(-1, rag_system_msg)
+        except Exception as e:
+            print(f"[Chat] RAG search error during model regenerate: {e}")
+
+    try:
+        llm = create_llm_client(model=request.model)
+        response = await llm.invoke(langchain_messages)
+        full_text = response.get("text", "")
+        thinking = response.get("thinking")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{request.model} error: {str(e)}")
+
+    if not full_text:
+        raise HTTPException(status_code=500, detail="Empty response from model")
+
+    # Find version index by model name
+    version_index = None
+    if assistant_msg.versions:
+        for i, v in enumerate(assistant_msg.versions):
+            if v.get("model") == request.model:
+                version_index = i
+                break
+
+    if version_index is not None:
+        # Update existing version in-place
+        updated_msg = conversation_service.update_version(
+            request.conversation_id,
+            request.message_id,
+            version_index,
+            full_text,
+            thinking,
+            status="success",
+        )
+    else:
+        # Should not happen, but fallback to adding a new version
+        updated_msg = conversation_service.add_version(
+            request.conversation_id,
+            request.message_id,
+            full_text,
+            thinking,
+            model=request.model,
+            is_multi_mode=True,
+            status="success",
+        )
+
+    if not updated_msg:
+        raise HTTPException(status_code=500, detail="Failed to save regenerated response")
+
+    return RegenerateModelResponse(
+        message_id=request.message_id,
+        content=full_text,
+        thinking=thinking,
+        model=request.model,
     )

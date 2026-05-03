@@ -237,6 +237,8 @@ def add_version(
     thinking: Optional[str],
     model: Optional[str] = None,
     is_multi_mode: bool = False,
+    status: Optional[str] = None,
+    error: Optional[str] = None,
 ) -> Optional[Message]:
     """Append a new version dict to the message's versions list. Sets selected_version_index to the new index."""
     conv = get_conversation(conversation_id)
@@ -254,6 +256,10 @@ def add_version(
             }
             if model is not None:
                 version["model"] = model
+            if status is not None:
+                version["status"] = status
+            if error is not None:
+                version["error"] = error
             m.versions.append(version)
             m.selected_version_index = len(m.versions) - 1
             conv.updated_at = datetime.utcnow()
@@ -262,6 +268,68 @@ def add_version(
                 message_id,
                 versions=m.versions,
                 selected_version_index=m.selected_version_index,
+            )
+            return m
+    return None
+
+
+def update_version(
+    conversation_id: str,
+    message_id: str,
+    version_index: int,
+    content: str,
+    thinking: Optional[str],
+    status: str = "success",
+    error: Optional[str] = None,
+) -> Optional[Message]:
+    """Update an existing version in-place by index."""
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
+        if m.id == message_id:
+            if m.versions is None or not (0 <= version_index < len(m.versions)):
+                return None
+            m.versions[version_index]["content"] = content
+            m.versions[version_index]["thinking"] = thinking
+            m.versions[version_index]["status"] = status
+            if error is not None:
+                m.versions[version_index]["error"] = error
+            else:
+                m.versions[version_index].pop("error", None)
+            conv.updated_at = datetime.utcnow()
+            _persist(conv)
+            db_service.db_update_message(
+                message_id,
+                versions=m.versions,
+            )
+            return m
+    return None
+
+
+def append_chunk_to_version(
+    conversation_id: str,
+    message_id: str,
+    version_index: int,
+    text: str = "",
+    thinking: str = "",
+) -> Optional[Message]:
+    """Append content/thinking to a specific version in-place."""
+    conv = get_conversation(conversation_id)
+    if not conv:
+        return None
+    for m in conv.messages:
+        if m.id == message_id:
+            if m.versions is None or not (0 <= version_index < len(m.versions)):
+                return None
+            if text:
+                m.versions[version_index]["content"] = (m.versions[version_index].get("content") or "") + text
+            if thinking:
+                m.versions[version_index]["thinking"] = (m.versions[version_index].get("thinking") or "") + thinking
+            _write_json_safe(conv)
+            db_service.db_update_message(
+                message_id,
+                versions=m.versions,
             )
             return m
     return None

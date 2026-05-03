@@ -182,43 +182,61 @@ class MultiStreamManager:
 
     def _merge_results(self, state: MultiStreamState):
         """Merge all model results into versions of the primary assistant message."""
-        first_model_content = None
-        first_model_thinking = None
+        first_success_content = None
+        first_success_thinking = None
+        first_success_index = None
 
         for i, model in enumerate(state.models):
             ms = state.model_states[model]
-            if ms.error or (not ms.full_text and not ms.full_thinking):
+            has_content = bool(ms.full_text or ms.full_thinking)
+
+            if ms.error:
+                # Save failed version with error status so the tag persists
+                conversation_service.add_version(
+                    state.conversation_id,
+                    state.assistant_msg_id,
+                    "",
+                    None,
+                    model=model,
+                    is_multi_mode=True,
+                    status="error",
+                    error=ms.error,
+                )
+            elif has_content:
+                conversation_service.add_version(
+                    state.conversation_id,
+                    state.assistant_msg_id,
+                    ms.full_text,
+                    ms.full_thinking,
+                    model=model,
+                    is_multi_mode=True,
+                    status="success",
+                )
+                if first_success_content is None:
+                    first_success_content = ms.full_text
+                    first_success_thinking = ms.full_thinking
+                    first_success_index = i
+            else:
+                # Empty but not an error — skip
                 continue
 
-            if i == 0:
-                first_model_content = ms.full_text
-                first_model_thinking = ms.full_thinking
-
-            conversation_service.add_version(
-                state.conversation_id,
-                state.assistant_msg_id,
-                ms.full_text,
-                ms.full_thinking,
-                model=model,
-                is_multi_mode=True,
-            )
-
-        # Write first model's content to primary fields for backward compatibility
-        if first_model_content is not None:
+        # Write first successful model's content to primary fields
+        if first_success_content is not None:
             conversation_service.update_message(
                 state.conversation_id,
                 state.assistant_msg_id,
-                content=first_model_content,
-                thinking=first_model_thinking,
+                content=first_success_content,
+                thinking=first_success_thinking,
                 complete=True,
                 rag_contexts=state.rag_contexts,
             )
 
-        # Select version 0 (first model) by default
+        # Select first successful version by default, or version 0 if all failed
+        default_index = first_success_index if first_success_index is not None else 0
         conversation_service.select_version(
             state.conversation_id,
             state.assistant_msg_id,
-            0,
+            default_index,
         )
 
     def stop_multi_stream(self, conversation_id: str) -> bool:
