@@ -131,9 +131,9 @@ class _LLMClientAdapter:
             elif chunk.event == StreamEvent.DONE:
                 return
 
-    async def invoke(self, messages: list) -> dict:
+    def invoke(self, messages: list) -> dict:
         llm_messages = _convert_langchain_messages(messages)
-        response = await self._llm.async_completion(llm_messages, provider=self._provider)
+        response = self._llm.completion(llm_messages, provider=self._provider)
         return {"text": response.content, "thinking": response.thinking or None}
 
 

@@ -16,7 +16,7 @@ def generate_title(first_message: str) -> str:
         llm = create_llm_client()
 
         response = llm.invoke([
-            SystemMessage(content="You are a title generator. Given a user's first message to a chatbot, generate a very short title (3-5 words max) that summarizes what the conversation is about. Only respond with the title, nothing else."),
+            SystemMessage(content="You are a title generator. Given the content, generate a very short title (3-5 words max) that summarizes what the content is about. Only respond with the title, nothing else."),
             HumanMessage(content=first_message),
         ])
 

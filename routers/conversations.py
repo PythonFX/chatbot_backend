@@ -185,7 +185,8 @@ async def auto_rename_conversation(conversation_id: str):
     if not first_user_message:
         raise HTTPException(status_code=400, detail="No user message found to generate title from")
 
-    new_title = generate_title(first_user_message)
+    import asyncio
+    new_title = await asyncio.to_thread(generate_title, first_user_message)
     updated = conversation_service.update_title(conversation_id, new_title)
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update title")
