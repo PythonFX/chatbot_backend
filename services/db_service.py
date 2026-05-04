@@ -99,26 +99,6 @@ def _run_migrations() -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN is_multi_mode INTEGER NOT NULL DEFAULT 0")
             conn.commit()
             print("[DB] Migrated: added is_multi_mode column to messages")
-
-        # Drop novel-related columns from conversations table
-        cur = conn.execute("PRAGMA table_info(conversations)")
-        conv_columns = [row["name"] for row in cur.fetchall()]
-        if "is_novel_agent" in conv_columns or "selected_novel_id" in conv_columns:
-            conn.executescript("""
-                CREATE TABLE conversations_new (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL DEFAULT 'New Chat',
-                    file_ids TEXT NOT NULL DEFAULT '[]',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                INSERT INTO conversations_new (id, title, file_ids, created_at, updated_at)
-                    SELECT id, title, file_ids, created_at, updated_at FROM conversations;
-                DROP TABLE conversations;
-                ALTER TABLE conversations_new RENAME TO conversations;
-            """)
-            conn.commit()
-            print("[DB] Migrated: dropped is_novel_agent and selected_novel_id columns from conversations")
     finally:
         conn.close()
 
