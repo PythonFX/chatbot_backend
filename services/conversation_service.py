@@ -64,28 +64,6 @@ def update_title(conversation_id: str, title: str) -> Optional[Conversation]:
     return conv
 
 
-def set_novel_agent(conversation_id: str, is_novel_agent: bool) -> Optional[Conversation]:
-    conv = get_conversation(conversation_id)
-    if not conv:
-        return None
-    conv.is_novel_agent = is_novel_agent
-    if not is_novel_agent:
-        conv.selected_novel_id = None
-    conv.updated_at = datetime.utcnow()
-    _persist(conv)
-    return conv
-
-
-def set_selected_novel(conversation_id: str, novel_id: str) -> Optional[Conversation]:
-    conv = get_conversation(conversation_id)
-    if not conv:
-        return None
-    conv.selected_novel_id = novel_id
-    conv.updated_at = datetime.utcnow()
-    _persist(conv)
-    return conv
-
-
 def update_file_ids(conversation_id: str, file_ids: list[str]) -> Optional[Conversation]:
     conv = get_conversation(conversation_id)
     if not conv:

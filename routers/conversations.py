@@ -35,8 +35,6 @@ def _build_conv_response(conv) -> dict:
         "file_ids": conv.file_ids,
         "created_at": conv.created_at.isoformat(),
         "updated_at": conv.updated_at.isoformat(),
-        "is_novel_agent": conv.is_novel_agent,
-        "selected_novel_id": conv.selected_novel_id,
     }
 
 
@@ -91,8 +89,6 @@ class ConversationResponse(BaseModel):
     file_ids: list[str] = []
     created_at: str
     updated_at: str
-    is_novel_agent: bool = False
-    selected_novel_id: Optional[str] = None
 
 
 class UpdateFilesRequest(BaseModel):

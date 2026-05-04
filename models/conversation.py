@@ -78,9 +78,6 @@ class Conversation(BaseModel):
     file_ids: list[str] = []  # Linked file IDs for RAG
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    # Novel agent mode
-    is_novel_agent: bool = False
-    selected_novel_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -90,8 +87,6 @@ class Conversation(BaseModel):
             "file_ids": self.file_ids,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
-            "is_novel_agent": self.is_novel_agent,
-            "selected_novel_id": self.selected_novel_id,
         }
 
     @classmethod
@@ -107,6 +102,4 @@ class Conversation(BaseModel):
             file_ids=data.get("file_ids", []),
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
-            is_novel_agent=data.get("is_novel_agent", False),
-            selected_novel_id=data.get("selected_novel_id"),
         )

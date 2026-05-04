@@ -26,8 +26,6 @@ def _row_to_conv(row: sqlite3.Row) -> dict:
         "id": row["id"],
         "title": row["title"],
         "file_ids": json.loads(row["file_ids"]) if row["file_ids"] else [],
-        "is_novel_agent": bool(row["is_novel_agent"]),
-        "selected_novel_id": row["selected_novel_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "messages": [],
@@ -63,8 +61,6 @@ def init_tables() -> None:
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT 'New Chat',
                 file_ids TEXT NOT NULL DEFAULT '[]',
-                is_novel_agent INTEGER NOT NULL DEFAULT 0,
-                selected_novel_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -103,6 +99,26 @@ def _run_migrations() -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN is_multi_mode INTEGER NOT NULL DEFAULT 0")
             conn.commit()
             print("[DB] Migrated: added is_multi_mode column to messages")
+
+        # Drop novel-related columns from conversations table
+        cur = conn.execute("PRAGMA table_info(conversations)")
+        conv_columns = [row["name"] for row in cur.fetchall()]
+        if "is_novel_agent" in conv_columns or "selected_novel_id" in conv_columns:
+            conn.executescript("""
+                CREATE TABLE conversations_new (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT 'New Chat',
+                    file_ids TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO conversations_new (id, title, file_ids, created_at, updated_at)
+                    SELECT id, title, file_ids, created_at, updated_at FROM conversations;
+                DROP TABLE conversations;
+                ALTER TABLE conversations_new RENAME TO conversations;
+            """)
+            conn.commit()
+            print("[DB] Migrated: dropped is_novel_agent and selected_novel_id columns from conversations")
     finally:
         conn.close()
 
@@ -119,14 +135,12 @@ def db_upsert_conversation(conv: dict) -> None:
     try:
         conn.execute("""
             INSERT OR REPLACE INTO conversations
-            (id, title, file_ids, is_novel_agent, selected_novel_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, title, file_ids, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
         """, (
             conv["id"],
             conv["title"],
             json.dumps(conv.get("file_ids", [])),
-            int(conv.get("is_novel_agent", False)),
-            conv.get("selected_novel_id"),
             conv["created_at"],
             conv["updated_at"],
         ))
@@ -197,8 +211,8 @@ def db_create_conversation(conv_id: str, created_at: str, updated_at: str) -> di
     conn = _get_db()
     try:
         conn.execute("""
-            INSERT INTO conversations (id, title, file_ids, is_novel_agent, selected_novel_id, created_at, updated_at)
-            VALUES (?, 'New Chat', '[]', 0, NULL, ?, ?)
+            INSERT INTO conversations (id, title, file_ids, created_at, updated_at)
+            VALUES (?, 'New Chat', '[]', ?, ?)
         """, (conv_id, created_at, updated_at))
         conn.commit()
     finally:
@@ -212,30 +226,6 @@ def db_update_title(conv_id: str, title: str, updated_at: str) -> None:
         conn.execute(
             "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
             (title, updated_at, conv_id)
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def db_set_novel_agent(conv_id: str, is_novel: bool, updated_at: str) -> None:
-    conn = _get_db()
-    try:
-        conn.execute(
-            "UPDATE conversations SET is_novel_agent = ?, updated_at = ? WHERE id = ?",
-            (int(is_novel), updated_at, conv_id)
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def db_set_selected_novel(conv_id: str, novel_id: str, updated_at: str) -> None:
-    conn = _get_db()
-    try:
-        conn.execute(
-            "UPDATE conversations SET selected_novel_id = ?, updated_at = ? WHERE id = ?",
-            (novel_id, updated_at, conv_id)
         )
         conn.commit()
     finally:

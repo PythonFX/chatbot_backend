@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -15,7 +14,6 @@ from services.llm_factory import create_llm_client, is_llm_configured, get_avail
 from services.stream_manager import stream_manager
 from services.multi_stream_manager import multi_stream_manager
 from services.embedding_service import search_chunks_in_files
-from services import novel_service
 
 
 router = APIRouter(tags=["chat"])
@@ -104,24 +102,6 @@ def _build_langchain_messages(messages: list, conversation_id: str = "") -> list
     return langchain_messages
 
 
-def _build_novel_system_message(novel_data: dict) -> SystemMessage:
-    """Format selected novel data into a system message for the LLM."""
-    chapters_lines = "\n".join(
-        f"{c['index']}. {c['title']}" for c in novel_data["chapters"]
-    )
-    inspiration_str = json.dumps(novel_data.get("inspiration") or {}, ensure_ascii=False, indent=2)
-    return SystemMessage(
-        content=f"""你正在使用小说参考资料进行创作分析。
-当前参考小说：《{novel_data["title"]}》
-
-【章节列表】
-{chapters_lines}
-
-【灵感分析（inspiration.json）】
-{inspiration_str}
-
-请结合上述参考内容进行创作。请先阅读章节列表和灵感分析，然后在后续对话中依据这些内容回答用户的问题或提供创作建议。"""
-    )
 
 
 @router.post("/chat/stream")
@@ -213,84 +193,6 @@ async def chat_stream(request: ChatRequest):
 
     msg_text = request.message.strip()
 
-    # ── Novel agent flow ───────────────────────────────────────────────────────
-    is_novel = conversation.is_novel_agent
-    is_selecting_book = is_novel and conversation.selected_novel_id is None
-
-    # 1) User typed /novel → enter novel agent mode, list books
-    if msg_text == "/novel":
-        conversation_service.set_novel_agent(request.conversation_id, True)
-        novels = novel_service.list_novels()
-
-        async def generate_book_list():
-            yield f"data: {json.dumps({'type': 'novel_books', 'books': novels})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'message_id': '', 'title': conversation.title})}\n\n"
-
-        return StreamingResponse(
-            generate_book_list(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # 2) User sent a number → book selection
-    if is_selecting_book and re.fullmatch(r"\d+", msg_text):
-        idx = int(msg_text)
-        novels = novel_service.list_novels()
-        if idx < 1 or idx > len(novels):
-            async def generate_error():
-                yield f"data: {json.dumps({'type': 'error', 'error': f'Invalid selection. Please enter a number between 1 and {len(novels)}.'})}\n\n"
-
-            return StreamingResponse(
-                generate_error(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-        selected_novel = novels[idx - 1]
-        novel_data = novel_service.load_novel(selected_novel["id"])
-        conversation_service.set_selected_novel(request.conversation_id, selected_novel["id"])
-        conversation_service.update_title(request.conversation_id, selected_novel["title"])
-
-        # Save chapters + analysis + inspiration as an assistant message
-        chapters_lines = "\n".join(f"{c['index']}. {c['title']}" for c in novel_data["chapters"])
-        msg_content = (
-            f"**【参考小说：《{novel_data['title']}》】**\n\n"
-            f"**Chapters**\n{chapters_lines}\n\n"
-        )
-        if novel_data.get("analysis"):
-            analysis_str = json.dumps(novel_data["analysis"], ensure_ascii=False, indent=2)
-            msg_content += f"**Analysis**\n```json\n{analysis_str}\n```\n\n"
-        if novel_data.get("inspiration"):
-            inspiration_str = json.dumps(novel_data["inspiration"], ensure_ascii=False, indent=2)
-            msg_content += f"**Inspiration**\n```json\n{inspiration_str}\n```"
-        else:
-            msg_content = msg_content.rstrip()
-        conversation_service.add_message(
-            request.conversation_id, "assistant", msg_content, type="novel_selected"
-        )
-
-        async def generate_selected():
-            yield f"data: {json.dumps({'type': 'novel_selected', 'book': novel_data})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'message_id': '', 'title': conversation.title})}\n\n"
-
-        return StreamingResponse(
-            generate_selected(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
     # ── Normal chat ───────────────────────────────────────────────────────────
     result = conversation_service.add_message(
         request.conversation_id, "user", request.message
@@ -304,13 +206,6 @@ async def chat_stream(request: ChatRequest):
     conversation, user_msg = result
 
     langchain_messages = _build_langchain_messages(conversation.messages, request.conversation_id)
-
-    # Inject novel context for active novel agent conversations
-    if is_novel and conversation.selected_novel_id:
-        novel_data = novel_service.load_novel(conversation.selected_novel_id)
-        if novel_data:
-            novel_sys_msg = _build_novel_system_message(novel_data)
-            langchain_messages.insert(-1, novel_sys_msg)
 
     # RAG context
     rag_chunks: list[dict] = []
@@ -394,7 +289,6 @@ async def chat_stream(request: ChatRequest):
                 print(f"[Chat] Deep Q&A error: {e}")
                 yield f"data: {json.dumps({'type': 'deep_qa_status', 'status': 'error', 'message': str(e)})}\n\n"
 
-        # Re-fetch conversation in case it was updated by novel_service calls above
         conversation = conversation_service.get_conversation(request.conversation_id)
 
         # ── Multi-model branch ──────────────────────────────────────────────
@@ -588,13 +482,6 @@ async def regenerate_response(request: RegenerateRequest):
 
     langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1], request.conversation_id)
 
-    # Inject novel context if in novel agent mode with a selected novel
-    if conversation.is_novel_agent and conversation.selected_novel_id:
-        novel_data = novel_service.load_novel(conversation.selected_novel_id)
-        if novel_data:
-            novel_sys_msg = _build_novel_system_message(novel_data)
-            langchain_messages.insert(-1, novel_sys_msg)
-
     try:
         llm = create_llm_client()
         response = await llm.invoke(langchain_messages)
@@ -676,13 +563,6 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
         conversation.messages[:user_msg_index + 1],
         request.conversation_id,
     )
-
-    # Inject novel/RAG context
-    if conversation.is_novel_agent and conversation.selected_novel_id:
-        novel_data = novel_service.load_novel(conversation.selected_novel_id)
-        if novel_data:
-            novel_sys_msg = _build_novel_system_message(novel_data)
-            langchain_messages.insert(-1, novel_sys_msg)
 
     try:
         llm = create_llm_client()
@@ -775,13 +655,6 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
         conversation.messages[:user_msg_index + 1],
         request.conversation_id,
     )
-
-    # Inject novel/RAG context
-    if conversation.is_novel_agent and conversation.selected_novel_id:
-        novel_data = novel_service.load_novel(conversation.selected_novel_id)
-        if novel_data:
-            novel_sys_msg = _build_novel_system_message(novel_data)
-            langchain_messages.insert(-1, novel_sys_msg)
 
     # Create empty placeholder version (auto-selected by add_version)
     updated_msg = conversation_service.add_version(
@@ -935,13 +808,6 @@ async def regenerate_model(request: RegenerateModelRequest):
         conversation.messages[:assistant_idx],
         request.conversation_id,
     )
-
-    # Inject novel context if in novel agent mode
-    if conversation.is_novel_agent and conversation.selected_novel_id:
-        novel_data = novel_service.load_novel(conversation.selected_novel_id)
-        if novel_data:
-            novel_sys_msg = _build_novel_system_message(novel_data)
-            langchain_messages.insert(-1, novel_sys_msg)
 
     # RAG context
     if conversation.file_ids:
