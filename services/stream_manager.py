@@ -167,6 +167,18 @@ class StreamManager:
 
         except Exception as e:
             print(f"[StreamManager] Stream error for {state.conversation_id}: {e}")
+            state.is_complete = True
+            state.full_text = full_text
+            state.full_thinking = full_thinking
+            # Save partial content before the error
+            conversation_service.update_message(
+                state.conversation_id,
+                state.assistant_msg_id,
+                content=full_text,
+                thinking=full_thinking,
+                complete=True,
+                rag_contexts=state.rag_contexts,
+            )
             state.chunks.append({"type": "error", "error": str(e)})
             state.event.set()
 

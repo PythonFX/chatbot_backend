@@ -146,6 +146,8 @@ class MultiStreamManager:
         except Exception as e:
             ms.is_complete = True
             ms.error = str(e)
+            ms.full_text = full_text
+            ms.full_thinking = full_thinking
             state.chunks.append({
                 "type": "model_error",
                 "model": model,
@@ -180,6 +182,14 @@ class MultiStreamManager:
             print(f"[MultiStreamManager] Multi-stream cancelled for: {state.conversation_id}")
             raise
 
+        except Exception as e:
+            # Unexpected error from gather itself — still merge and end the stream
+            self._merge_results(state)
+            state.all_complete = True
+            state.chunks.append({"type": "error", "error": str(e)})
+            state.event.set()
+            print(f"[MultiStreamManager] Multi-stream unexpected error for {state.conversation_id}: {e}")
+
     def _merge_results(self, state: MultiStreamState):
         """Merge all model results into versions of the primary assistant message."""
         first_success_content = None
@@ -191,17 +201,21 @@ class MultiStreamManager:
             has_content = bool(ms.full_text or ms.full_thinking)
 
             if ms.error:
-                # Save failed version with error status so the tag persists
+                # Save failed version — preserve partial content if any
                 conversation_service.add_version(
                     state.conversation_id,
                     state.assistant_msg_id,
-                    "",
-                    None,
+                    ms.full_text or "",
+                    ms.full_thinking or None,
                     model=model,
                     is_multi_mode=True,
                     status="error",
                     error=ms.error,
                 )
+                if first_success_content is None and ms.full_text:
+                    first_success_content = ms.full_text
+                    first_success_thinking = ms.full_thinking
+                    first_success_index = i
             elif has_content:
                 conversation_service.add_version(
                     state.conversation_id,
