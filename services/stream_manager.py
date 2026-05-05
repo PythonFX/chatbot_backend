@@ -132,7 +132,7 @@ class StreamManager:
 
                 await asyncio.sleep(0)
 
-            # Stream completed normally
+            # Save partial/complete content
             state.is_complete = True
             state.full_text = full_text
             state.full_thinking = full_thinking
@@ -146,10 +146,14 @@ class StreamManager:
                 rag_contexts=state.rag_contexts,
             )
 
-            state.chunks.append({"type": "done"})
-            state.event.set()
-
-            print(f"[StreamManager] Stream complete for: {state.conversation_id} ({len(full_text)} chars)")
+            if state.stop_event.is_set():
+                state.chunks.append({"type": "stopped"})
+                state.event.set()
+                print(f"[StreamManager] Stream stopped for: {state.conversation_id} ({len(full_text)} chars)")
+            else:
+                state.chunks.append({"type": "done"})
+                state.event.set()
+                print(f"[StreamManager] Stream complete for: {state.conversation_id} ({len(full_text)} chars)")
 
         except asyncio.CancelledError:
             print(f"[StreamManager] Stream cancelled for: {state.conversation_id}")

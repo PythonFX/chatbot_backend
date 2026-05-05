@@ -168,10 +168,11 @@ class MultiStreamManager:
             self._merge_results(state)
 
             state.all_complete = True
-            state.chunks.append({"type": "done"})
+            any_stopped = any(ms.is_stopped for ms in state.model_states.values())
+            state.chunks.append({"type": "stopped" if any_stopped else "done"})
             state.event.set()
 
-            print(f"[MultiStreamManager] All models complete for: {state.conversation_id}")
+            print(f"[MultiStreamManager] All models {'stopped' if any_stopped else 'complete'} for: {state.conversation_id}")
 
         except asyncio.CancelledError:
             # On cancellation, still merge whatever we have
