@@ -12,17 +12,19 @@ from llm_client import (
     create_anthropic_client,
     create_doubao_client,
     create_kimi_client,
+    create_mlx_client,
 )
 
 # ── Model ↔ Provider mapping ────────────────────────────────────────────────
 
 MODEL_TO_PROVIDER: dict[str, Provider] = {
-    "minimax": Provider.ANTHROPIC,
-    "glm5.1": Provider.DOUBAO,
-    "kimi-k2.6": Provider.KIMI,
+    "Minimax": Provider.ANTHROPIC,
+    "GLM-5.1": Provider.DOUBAO,
+    "Kimi K2.6": Provider.KIMI,
+    "Gemma4-e4b": Provider.MLX,
 }
 
-_current_model = "minimax"
+_current_model = "Minimax"
 
 # ── Singleton LLMClient ────────────────────────────────────────────────────
 
@@ -39,24 +41,31 @@ def _init_llm_client() -> LLMClient:
 
     # minimax via Anthropic-compatible API
     try:
-        llm.add_client(Provider.ANTHROPIC, create_anthropic_client(), default=True)
+        llm.add_client(Provider.ANTHROPIC, create_anthropic_client(profile_name="minimax-anthropic"), default=True)
         print("[LLMFactory] Registered: minimax (Anthropic)")
     except KeyError as e:
-        print(f"[LLMFactory] Skipped minimax — missing env var: {e}")
+        print(f"[LLMFactory] Skipped minimax: {e}")
 
     # glm5.1 via Doubao API
     try:
-        llm.add_client(Provider.DOUBAO, create_doubao_client())
+        llm.add_client(Provider.DOUBAO, create_doubao_client(profile_name="doubao-glm"))
         print("[LLMFactory] Registered: glm5.1 (Doubao)")
     except KeyError as e:
-        print(f"[LLMFactory] Skipped glm5.1 — missing env var: {e}")
+        print(f"[LLMFactory] Skipped glm5.1: {e}")
 
     # kimi-k2.6 via Kimi API
     try:
-        llm.add_client(Provider.KIMI, create_kimi_client())
+        llm.add_client(Provider.KIMI, create_kimi_client(profile_name="kimi-k26"))
         print("[LLMFactory] Registered: kimi-k2.6 (Kimi)")
     except KeyError as e:
-        print(f"[LLMFactory] Skipped kimi-k2.6 — missing env var: {e}")
+        print(f"[LLMFactory] Skipped kimi-k2.6: {e}")
+        
+    # Gemma4 via Mlx Client
+    try:
+        llm.add_client(Provider.MLX, create_mlx_client())
+        print("[LLMFactory] Registered: Gemma-e4b (Mlx)")
+    except KeyError as e:
+        print(f"[LLMFactory] Skipped Gemma-e4b: {e}")
 
     _llm_client = llm
     return _llm_client
