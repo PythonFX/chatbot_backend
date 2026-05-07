@@ -26,6 +26,8 @@ def _row_to_conv(row: sqlite3.Row) -> dict:
         "id": row["id"],
         "title": row["title"],
         "file_ids": json.loads(row["file_ids"]) if row["file_ids"] else [],
+        "type": row["type"] if "type" in row.keys() else "single",
+        "agents": json.loads(row["agents"]) if "agents" in row.keys() and row["agents"] else [],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "messages": [],
@@ -47,6 +49,8 @@ def _row_to_msg(row: sqlite3.Row) -> dict:
         "versions": json.loads(row["versions"]) if row["versions"] else None,
         "selected_version_index": row["selected_version_index"],
         "is_multi_mode": bool(row["is_multi_mode"]) if "is_multi_mode" in row.keys() else False,
+        "sender_id": row["sender_id"] if "sender_id" in row.keys() else None,
+        "sender_name": row["sender_name"] if "sender_name" in row.keys() else None,
         "created_at": row["created_at"],
     }
 
@@ -92,13 +96,31 @@ def _run_migrations() -> None:
     """Add columns that may not exist in older DB schemas."""
     conn = _get_db()
     try:
-        # Check if is_multi_mode column exists
         cur = conn.execute("PRAGMA table_info(messages)")
-        columns = [row["name"] for row in cur.fetchall()]
-        if "is_multi_mode" not in columns:
+        msg_columns = [row["name"] for row in cur.fetchall()]
+        if "is_multi_mode" not in msg_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN is_multi_mode INTEGER NOT NULL DEFAULT 0")
             conn.commit()
             print("[DB] Migrated: added is_multi_mode column to messages")
+        if "sender_id" not in msg_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN sender_id TEXT DEFAULT NULL")
+            conn.commit()
+            print("[DB] Migrated: added sender_id column to messages")
+        if "sender_name" not in msg_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN sender_name TEXT DEFAULT NULL")
+            conn.commit()
+            print("[DB] Migrated: added sender_name column to messages")
+
+        cur = conn.execute("PRAGMA table_info(conversations)")
+        conv_columns = [row["name"] for row in cur.fetchall()]
+        if "type" not in conv_columns:
+            conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT DEFAULT 'single'")
+            conn.commit()
+            print("[DB] Migrated: added type column to conversations")
+        if "agents" not in conv_columns:
+            conn.execute("ALTER TABLE conversations ADD COLUMN agents TEXT DEFAULT '[]'")
+            conn.commit()
+            print("[DB] Migrated: added agents column to conversations")
     finally:
         conn.close()
 
@@ -115,12 +137,14 @@ def db_upsert_conversation(conv: dict) -> None:
     try:
         conn.execute("""
             INSERT OR REPLACE INTO conversations
-            (id, title, file_ids, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            (id, title, file_ids, type, agents, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             conv["id"],
             conv["title"],
             json.dumps(conv.get("file_ids", [])),
+            conv.get("type", "single"),
+            json.dumps(conv.get("agents", [])),
             conv["created_at"],
             conv["updated_at"],
         ))
@@ -135,8 +159,9 @@ def db_add_message_raw(msg: dict) -> None:
         conn.execute("""
             INSERT OR REPLACE INTO messages
             (id, conversation_id, role, content, thinking, signature, type,
-             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode,
+             sender_id, sender_name, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg["id"],
             msg["conversation_id"],
@@ -151,6 +176,8 @@ def db_add_message_raw(msg: dict) -> None:
             json.dumps(msg.get("versions")) if msg.get("versions") else None,
             msg.get("selected_version_index"),
             int(msg.get("is_multi_mode", False)),
+            msg.get("sender_id"),
+            msg.get("sender_name"),
             msg["created_at"],
         ))
         conn.commit()
@@ -239,14 +266,17 @@ def db_add_message(
     versions: Optional[list] = None,
     selected_version_index: Optional[int] = None,
     is_multi_mode: bool = False,
+    sender_id: Optional[str] = None,
+    sender_name: Optional[str] = None,
 ) -> dict:
     conn = _get_db()
     try:
         conn.execute("""
             INSERT INTO messages
             (id, conversation_id, role, content, thinking, signature, type,
-             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             raw_response, complete, rag_contexts, versions, selected_version_index, is_multi_mode,
+             sender_id, sender_name, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             msg_id, conv_id, role, content, thinking, signature, msg_type,
             json.dumps(raw_response) if raw_response else None,
@@ -255,6 +285,8 @@ def db_add_message(
             json.dumps(versions) if versions else None,
             selected_version_index,
             int(is_multi_mode),
+            sender_id,
+            sender_name,
             created_at,
         ))
         conn.execute(
@@ -271,6 +303,7 @@ def db_add_message(
         "complete": complete, "rag_contexts": rag_contexts,
         "versions": versions, "selected_version_index": selected_version_index,
         "is_multi_mode": is_multi_mode,
+        "sender_id": sender_id, "sender_name": sender_name,
         "created_at": created_at,
     }
 
@@ -296,7 +329,7 @@ def db_remove_message(msg_id: str) -> bool:
 
 
 def db_update_message(msg_id: str, **fields) -> Optional[dict]:
-    allowed = {"content", "thinking", "complete", "rag_contexts", "versions", "selected_version_index", "is_multi_mode"}
+    allowed = {"content", "thinking", "complete", "rag_contexts", "versions", "selected_version_index", "is_multi_mode", "sender_id", "sender_name"}
     sets, args = [], []
     for k, v in fields.items():
         if k in allowed:

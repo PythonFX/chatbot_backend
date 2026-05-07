@@ -25,6 +25,10 @@ class Message(BaseModel):
     selected_version_index: Optional[int] = None
     # Whether this message was generated in multi-model mode
     is_multi_mode: bool = False
+    # Sender identity for group chat (model ID, null for user messages)
+    sender_id: Optional[str] = None
+    # Sender display name for group chat (null for user messages)
+    sender_name: Optional[str] = None
 
     def to_dict(self) -> dict:
         result = {
@@ -50,6 +54,10 @@ class Message(BaseModel):
             result["selected_version_index"] = self.selected_version_index
         if self.is_multi_mode:
             result["is_multi_mode"] = self.is_multi_mode
+        if self.sender_id:
+            result["sender_id"] = self.sender_id
+        if self.sender_name:
+            result["sender_name"] = self.sender_name
         return result
 
     @classmethod
@@ -68,6 +76,8 @@ class Message(BaseModel):
             versions=data.get("versions"),
             selected_version_index=data.get("selected_version_index"),
             is_multi_mode=data.get("is_multi_mode", False),
+            sender_id=data.get("sender_id"),
+            sender_name=data.get("sender_name"),
         )
 
 
@@ -76,18 +86,25 @@ class Conversation(BaseModel):
     title: str = "New Chat"
     messages: list[Message] = []
     file_ids: list[str] = []  # Linked file IDs for RAG
+    # Conversation type: "single" or "group_chat"
+    type: str = "single"
+    # Agent model IDs participating in group chat
+    agents: list[str] = []
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "id": self.id,
             "title": self.title,
             "messages": [m.to_dict() for m in self.messages],
             "file_ids": self.file_ids,
+            "type": self.type,
+            "agents": self.agents,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> "Conversation":
@@ -100,6 +117,8 @@ class Conversation(BaseModel):
             title=data["title"],
             messages=messages,
             file_ids=data.get("file_ids", []),
+            type=data.get("type", "single"),
+            agents=data.get("agents", []),
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
         )

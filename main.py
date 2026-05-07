@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from routers import conversations, chat, files
+from routers import conversations, chat, files, group_chat
 from services.db_service import init_db
 
 load_dotenv()
@@ -46,6 +46,7 @@ app.add_middleware(
 app.include_router(conversations.router)
 app.include_router(chat.router)
 app.include_router(files.router)
+app.include_router(group_chat.router)
 
 
 @app.get("/health")

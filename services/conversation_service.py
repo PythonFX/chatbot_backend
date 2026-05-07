@@ -54,6 +54,14 @@ def create_conversation() -> Conversation:
     return conv
 
 
+def create_group_conversation(agent_ids: list[str]) -> Conversation:
+    conv = Conversation(type="group_chat", agents=agent_ids)
+    conv.created_at = datetime.utcnow()
+    conv.updated_at = conv.created_at
+    _persist(conv)
+    return conv
+
+
 def update_title(conversation_id: str, title: str) -> Optional[Conversation]:
     conv = get_conversation(conversation_id)
     if not conv:
@@ -84,6 +92,8 @@ def add_message(
     raw_response: Optional[dict] = None,
     complete: bool = True,
     is_multi_mode: bool = False,
+    sender_id: Optional[str] = None,
+    sender_name: Optional[str] = None,
 ) -> Optional[Tuple[Conversation, Message]]:
     if content is None:
         raise ValueError("Message content cannot be None")
@@ -102,6 +112,8 @@ def add_message(
         raw_response=raw_response,
         complete=complete,
         is_multi_mode=is_multi_mode,
+        sender_id=sender_id,
+        sender_name=sender_name,
     )
     msg.created_at = now
     conv.messages.append(msg)
@@ -113,6 +125,7 @@ def add_message(
         msg.rag_contexts, msg.created_at.isoformat(),
         msg.versions, msg.selected_version_index,
         msg.is_multi_mode,
+        msg.sender_id, msg.sender_name,
     )
     _write_json_safe(conv)
     return conv, msg

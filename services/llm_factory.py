@@ -24,6 +24,14 @@ MODEL_TO_PROVIDER: dict[str, Provider] = {
     "Gemma4-e4b": Provider.MLX,
 }
 
+# Display names for models (used in group chat and UI)
+MODEL_DISPLAY_NAMES: dict[str, str] = {
+    "Minimax": "Minimax",
+    "GLM-5.1": "GLM-5.1",
+    "Kimi K2.6": "Kimi K2.6",
+    "Gemma4-e4b": "Gemma4-e4b",
+}
+
 _current_model = "Minimax"
 
 # ── Singleton LLMClient ────────────────────────────────────────────────────

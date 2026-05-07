@@ -22,6 +22,8 @@ def _build_message_responses(messages) -> list:
             versions=m.versions,
             selected_version_index=m.selected_version_index,
             is_multi_mode=m.is_multi_mode,
+            sender_id=m.sender_id,
+            sender_name=m.sender_name,
         )
         for m in messages
     ]
@@ -33,6 +35,8 @@ def _build_conv_response(conv) -> dict:
         "title": conv.title,
         "messages": _build_message_responses(conv.messages),
         "file_ids": conv.file_ids,
+        "type": conv.type,
+        "agents": conv.agents,
         "created_at": conv.created_at.isoformat(),
         "updated_at": conv.updated_at.isoformat(),
     }
@@ -80,6 +84,8 @@ class MessageResponse(BaseModel):
     versions: list[dict] | None = None
     selected_version_index: int | None = None
     is_multi_mode: bool = False
+    sender_id: str | None = None
+    sender_name: str | None = None
 
 
 class ConversationResponse(BaseModel):
@@ -87,6 +93,8 @@ class ConversationResponse(BaseModel):
     title: str
     messages: list[MessageResponse]
     file_ids: list[str] = []
+    type: str = "single"
+    agents: list[str] = []
     created_at: str
     updated_at: str
 
