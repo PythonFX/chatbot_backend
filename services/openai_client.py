@@ -1,9 +1,9 @@
 import os
-from langchain_openai import AzureChatOpenAI
+from llm_client import AzureClient
 
 
-def create_azure_chat_openai() -> AzureChatOpenAI:
-    """Create an Azure Chat OpenAI client."""
+def create_azure_chat_openai() -> AzureClient:
+    """Create an Azure OpenAI client using llm_client."""
     api_key = os.getenv("OPENAI_API_KEY")
     azure_endpoint = os.getenv("AZURE_OPENAI_API_BASE")
     api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
@@ -15,11 +15,11 @@ def create_azure_chat_openai() -> AzureChatOpenAI:
     if not azure_endpoint:
         raise ValueError("AZURE_OPENAI_API_BASE environment variable is not set")
 
-    return AzureChatOpenAI(
+    return AzureClient(
         api_key=api_key,
-        azure_endpoint=azure_endpoint,
+        endpoint=azure_endpoint,
         api_version=api_version,
-        azure_deployment=deployment_name,
+        deployment=deployment_name,
     )
 
 

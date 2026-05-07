@@ -6,6 +6,7 @@ from typing import Optional
 
 from services import conversation_service
 from services.llm_factory import create_llm_client
+from llm_client import StreamEvent
 from services.title_generator import generate_title
 
 
@@ -92,33 +93,33 @@ class StreamManager:
 
         try:
             print(f"[StreamManager] Beginning LLM stream for: {state.conversation_id}")
-            async for parsed in llm.astream(messages):
+            async for chunk in llm.async_stream(messages):
                 if state.stop_event.is_set():
                     print(f"[StreamManager] Stop event detected for: {state.conversation_id}")
                     break
 
                 # Update thinking if present
-                if parsed.get("thinking"):
-                    full_thinking += parsed["thinking"]
+                if chunk.event == StreamEvent.THINKING:
+                    full_thinking += chunk.data
                     conversation_service.append_chunk(
                         state.conversation_id,
                         state.assistant_msg_id,
                         text="",
-                        thinking=parsed["thinking"],
+                        thinking=chunk.data,
                     )
                     state.chunks.append({
                         "type": "thinking",
-                        "thinking": parsed["thinking"],
+                        "thinking": chunk.data,
                     })
                     state.event.set()
 
                 # Update text if present
-                if parsed.get("text"):
-                    full_text += parsed["text"]
+                elif chunk.event == StreamEvent.TEXT:
+                    full_text += chunk.data
                     conversation_service.append_chunk(
                         state.conversation_id,
                         state.assistant_msg_id,
-                        text=parsed["text"],
+                        text=chunk.data,
                         thinking="",
                     )
                     state.full_text = full_text
@@ -126,9 +127,12 @@ class StreamManager:
 
                     state.chunks.append({
                         "type": "chunk",
-                        "text": parsed["text"],
+                        "text": chunk.data,
                     })
                     state.event.set()
+
+                elif chunk.event == StreamEvent.DONE:
+                    break
 
                 await asyncio.sleep(0)
 

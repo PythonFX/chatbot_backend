@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from llm_client import Message, StreamEvent
 
 from services import conversation_service
 from services.conversation_service import save_conversation
@@ -89,17 +89,17 @@ class RegenerateModelResponse(BaseModel):
 stop_events: dict[str, asyncio.Event] = {}
 
 
-def _build_langchain_messages(messages: list, conversation_id: str = "") -> list:
-    langchain_messages = []
+def _build_llm_messages(messages: list, conversation_id: str = "") -> list[Message]:
+    llm_messages = []
     for m in messages:
         if m.role == "user":
-            langchain_messages.append(HumanMessage(content=m.content))
+            llm_messages.append(Message(role="user", content=m.content))
         elif m.role == "assistant":
             content, _ = conversation_service.get_selected_version(conversation_id, m.id)
-            langchain_messages.append(AIMessage(content=content))
+            llm_messages.append(Message(role="assistant", content=content))
         elif m.role == "system":
-            langchain_messages.append(SystemMessage(content=m.content))
-    return langchain_messages
+            llm_messages.append(Message(role="system", content=m.content))
+    return llm_messages
 
 
 
@@ -205,7 +205,7 @@ async def chat_stream(request: ChatRequest):
         )
     conversation, user_msg = result
 
-    langchain_messages = _build_langchain_messages(conversation.messages, request.conversation_id)
+    llm_messages = _build_llm_messages(conversation.messages, request.conversation_id)
 
     # RAG context
     rag_chunks: list[dict] = []
@@ -222,10 +222,11 @@ async def chat_stream(request: ChatRequest):
                 for i, chunk in enumerate(rag_chunks):
                     context_parts.append(f"[Context {i+1}] {chunk['chunk_text']}")
                 rag_context = "\n\n".join(context_parts)
-                rag_system_msg = SystemMessage(
+                rag_system_msg = Message(
+                    role="system",
                     content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
                 )
-                langchain_messages.insert(-1, rag_system_msg)
+                llm_messages.insert(-1, rag_system_msg)
                 print(f"[Chat] Added {len(rag_chunks)} RAG chunks to context")
         except Exception as e:
             print(f"[Chat] RAG search error: {e}")
@@ -277,10 +278,11 @@ async def chat_stream(request: ChatRequest):
 
                 if selected_contexts:
                     rag_context = build_rag_context(selected_contexts)
-                    rag_system_msg = SystemMessage(
+                    rag_system_msg = Message(
+                        role="system",
                         content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
                     )
-                    langchain_messages.insert(-1, rag_system_msg)
+                    llm_messages.insert(-1, rag_system_msg)
                     rag_chunks = selected_contexts
                     print(f"[Chat] Deep Q&A: selected {len(rag_chunks)} contexts")
                 else:
@@ -301,7 +303,7 @@ async def chat_stream(request: ChatRequest):
             multi_state = multi_stream_manager.start_multi_stream(
                 request.conversation_id,
                 assistant_msg_id,
-                langchain_messages,
+                llm_messages,
                 models=models,
                 title=title,
                 rag_contexts=rag_chunks,
@@ -367,7 +369,7 @@ async def chat_stream(request: ChatRequest):
             stream_state = stream_manager.start_stream(
                 request.conversation_id,
                 assistant_msg_id,
-                langchain_messages,
+                llm_messages,
                 title=title,
                 rag_contexts=rag_chunks,
             )
@@ -480,14 +482,14 @@ async def regenerate_response(request: RegenerateRequest):
             model=get_current_model(),
         )
 
-    langchain_messages = _build_langchain_messages(conversation.messages[:user_msg_index + 1], request.conversation_id)
+    llm_messages = _build_llm_messages(conversation.messages[:user_msg_index + 1], request.conversation_id)
 
     try:
         llm = create_llm_client()
-        response = await llm.invoke(langchain_messages)
+        response = await llm.async_completion(llm_messages)
 
-        full_text = response.get("text", "")
-        thinking = response.get("thinking")
+        full_text = response.content
+        thinking = response.thinking or None
 
     except asyncio.CancelledError:
         raise HTTPException(status_code=499, detail="Generation cancelled")
@@ -559,16 +561,16 @@ async def generate_version(message_id: str, request: GenerateVersionRequest):
     if user_msg_index < 0:
         raise HTTPException(status_code=400, detail="Cannot find preceding user message")
 
-    langchain_messages = _build_langchain_messages(
+    llm_messages = _build_llm_messages(
         conversation.messages[:user_msg_index + 1],
         request.conversation_id,
     )
 
     try:
         llm = create_llm_client()
-        response = await llm.invoke(langchain_messages)
-        full_text = response.get("text", "")
-        thinking = response.get("thinking")
+        response = await llm.async_completion(llm_messages)
+        full_text = response.content
+        thinking = response.thinking or None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MiniMax error: {str(e)}")
 
@@ -651,7 +653,7 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
             status_code=400,
         )
 
-    langchain_messages = _build_langchain_messages(
+    llm_messages = _build_llm_messages(
         conversation.messages[:user_msg_index + 1],
         request.conversation_id,
     )
@@ -674,9 +676,9 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
         full_thinking = ""
 
         try:
-            async for parsed in llm.astream(langchain_messages):
-                if parsed.get("thinking"):
-                    thinking_chunk = parsed["thinking"]
+            async for chunk in llm.async_stream(llm_messages):
+                if chunk.event == StreamEvent.THINKING:
+                    thinking_chunk = chunk.data
                     full_thinking += thinking_chunk
                     conversation_service.append_chunk_to_version(
                         request.conversation_id,
@@ -686,8 +688,8 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
                     )
                     yield f"data: {json.dumps({'type': 'thinking', 'thinking': thinking_chunk})}\n\n"
 
-                if parsed.get("text"):
-                    text_chunk = parsed["text"]
+                elif chunk.event == StreamEvent.TEXT:
+                    text_chunk = chunk.data
                     full_text += text_chunk
                     conversation_service.append_chunk_to_version(
                         request.conversation_id,
@@ -696,6 +698,9 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
                         text=text_chunk,
                     )
                     yield f"data: {json.dumps({'type': 'chunk', 'text': text_chunk})}\n\n"
+
+                elif chunk.event == StreamEvent.DONE:
+                    break
 
                 await asyncio.sleep(0)
 
@@ -804,7 +809,7 @@ async def regenerate_model(request: RegenerateModelRequest):
         raise HTTPException(status_code=400, detail="No preceding user message found")
 
     # Build context up to and including the user message
-    langchain_messages = _build_langchain_messages(
+    llm_messages = _build_llm_messages(
         conversation.messages[:assistant_idx],
         request.conversation_id,
     )
@@ -822,18 +827,19 @@ async def regenerate_model(request: RegenerateModelRequest):
                 for i, chunk in enumerate(rag_chunks):
                     context_parts.append(f"[Context {i+1}] {chunk['chunk_text']}")
                 rag_context = "\n\n".join(context_parts)
-                rag_system_msg = SystemMessage(
+                rag_system_msg = Message(
+                    role="system",
                     content=f"""You have access to the following documents. Use them to answer the user's question if relevant.\n\n{rag_context}\n\nIf the documents don't contain relevant information, say you don't know based on the provided documents."""
                 )
-                langchain_messages.insert(-1, rag_system_msg)
+                llm_messages.insert(-1, rag_system_msg)
         except Exception as e:
             print(f"[Chat] RAG search error during model regenerate: {e}")
 
     try:
         llm = create_llm_client(model=request.model)
-        response = await llm.invoke(langchain_messages)
-        full_text = response.get("text", "")
-        thinking = response.get("thinking")
+        response = await llm.async_completion(llm_messages)
+        full_text = response.content
+        thinking = response.thinking or None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{request.model} error: {str(e)}")
 

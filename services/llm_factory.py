@@ -1,13 +1,15 @@
 """
 LLM client factory using the external llm_client package.
-Supports 3 models: minimax, glm5.1, kimi-k2.6 — switch via set_current_model().
+Supports 4 models: minimax, glm5.1, kimi-k2.6, gemma4-e4b — switch via set_current_model().
 """
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator, Optional
 
 from llm_client import (
     LLMClient,
+    LLMResponse,
     Message,
     Provider,
+    StreamChunk,
     StreamEvent,
     create_anthropic_client,
     create_doubao_client,
@@ -108,28 +110,15 @@ def get_available_models() -> list[str]:
     return [m for m, p in MODEL_TO_PROVIDER.items() if p in llm._clients]
 
 
-# ── LangChain → llm_client Message conversion ──────────────────────────────
+# ── ModelLLMClient: thin wrapper routing to a specific model's provider ──────
 
-def _convert_langchain_messages(messages: list) -> list[Message]:
-    """Convert LangChain messages (HumanMessage / AIMessage / SystemMessage)
-    to llm_client.Message objects."""
-    result: list[Message] = []
-    for m in messages:
-        role = "user"
-        if hasattr(m, "type"):
-            role = {"human": "user", "ai": "assistant", "system": "system"}.get(m.type, "user")
-        elif hasattr(m, "role"):
-            role = m.role
-        content = m.content if hasattr(m, "content") else str(m)
-        result.append(Message(role=role, content=content))
-    return result
+class ModelLLMClient:
+    """Thin wrapper around LLMClient that routes to a specific model's provider.
 
-
-# ── Adapter: preserves the {"text", "thinking"} dict interface ──────────────
-
-class _LLMClientAdapter:
-    """Wraps llm_client.LLMClient and exposes the astream / invoke interface
-    that the rest of the backend expects (LangChain messages in, dicts out)."""
+    Accepts llm_client.Message objects directly.
+    Exposes completion/async_completion/stream/async_stream with the system
+    prompt extraction needed by some providers (Doubao/GLM).
+    """
 
     def __init__(self, model: str | None = None):
         self._llm = _init_llm_client()
@@ -138,16 +127,15 @@ class _LLMClientAdapter:
         else:
             self._provider = None  # use default
 
-    def _extract_system(self, llm_messages: list[Message]) -> tuple[Optional[str], list[Message]]:
-        """Extract system message from the list and return (system_prompt, remaining_messages).
+    def _extract_system(self, messages: list[Message]) -> tuple[Optional[str], list[Message]]:
+        """Extract system messages from the list and return (system_prompt, remaining_messages).
 
         Some providers (e.g. Doubao/GLM) don't support system messages in the message list
-        but accept a separate `system=` parameter. This method separates them so the caller
-        can pass the system prompt via the proper parameter.
+        but accept a separate `system=` parameter.
         """
         system_parts = []
         non_system = []
-        for m in llm_messages:
+        for m in messages:
             if m.role == "system":
                 system_parts.append(m.content)
             else:
@@ -155,32 +143,33 @@ class _LLMClientAdapter:
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return system_prompt, non_system
 
-    async def astream(self, messages: list, system: Optional[str] = None) -> AsyncIterator[dict]:
-        llm_messages = _convert_langchain_messages(messages)
-        extracted_system, llm_messages = self._extract_system(llm_messages)
-        # Caller-provided system takes precedence; otherwise use extracted
+    def completion(self, messages: list[Message], system: Optional[str] = None, **kwargs) -> LLMResponse:
+        extracted_system, filtered = self._extract_system(messages)
         system_prompt = system or extracted_system
-        async for chunk in self._llm.async_stream(llm_messages, system=system_prompt, provider=self._provider):
-            if chunk.event == StreamEvent.TEXT:
-                yield {"text": chunk.data, "thinking": None}
-            elif chunk.event == StreamEvent.THINKING:
-                yield {"text": "", "thinking": chunk.data}
-            elif chunk.event == StreamEvent.DONE:
-                return
+        return self._llm.completion(filtered, system=system_prompt, provider=self._provider, **kwargs)
 
-    def invoke(self, messages: list, system: Optional[str] = None) -> dict:
-        llm_messages = _convert_langchain_messages(messages)
-        extracted_system, llm_messages = self._extract_system(llm_messages)
+    async def async_completion(self, messages: list[Message], system: Optional[str] = None, **kwargs) -> LLMResponse:
+        extracted_system, filtered = self._extract_system(messages)
         system_prompt = system or extracted_system
-        response = self._llm.completion(llm_messages, system=system_prompt, provider=self._provider)
-        return {"text": response.content, "thinking": response.thinking or None}
+        return await self._llm.async_completion(filtered, system=system_prompt, provider=self._provider, **kwargs)
+
+    def stream(self, messages: list[Message], system: Optional[str] = None, **kwargs) -> Iterator[StreamChunk]:
+        extracted_system, filtered = self._extract_system(messages)
+        system_prompt = system or extracted_system
+        return self._llm.stream(filtered, system=system_prompt, provider=self._provider, **kwargs)
+
+    async def async_stream(self, messages: list[Message], system: Optional[str] = None, **kwargs) -> AsyncIterator[StreamChunk]:
+        extracted_system, filtered = self._extract_system(messages)
+        system_prompt = system or extracted_system
+        async for chunk in self._llm.async_stream(filtered, system=system_prompt, provider=self._provider, **kwargs):
+            yield chunk
 
 
 # ── Factory function (unchanged interface) ──────────────────────────────────
 
-def create_llm_client(model: str | None = None) -> _LLMClientAdapter:
-    """Return an adapter for the given model (or current active model)."""
-    return _LLMClientAdapter(model=model or _current_model)
+def create_llm_client(model: str | None = None) -> ModelLLMClient:
+    """Return a client for the given model (or current active model)."""
+    return ModelLLMClient(model=model or _current_model)
 
 
 def is_llm_configured(model: str | None = None) -> bool:

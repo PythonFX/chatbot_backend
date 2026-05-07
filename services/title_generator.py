@@ -1,4 +1,4 @@
-from langchain_core.messages import HumanMessage, SystemMessage
+from llm_client import Message
 from services.llm_factory import create_llm_client
 
 
@@ -15,12 +15,12 @@ def generate_title(first_message: str) -> str:
         print(f"[TitleGenerator] Calling LLM for: {first_message[:30]}...")
         llm = create_llm_client()
 
-        response = llm.invoke([
-            SystemMessage(content="You are a title generator. Given the content, generate a very short title (3-5 words max) that summarizes what the content is about. Only respond with the title, nothing else."),
-            HumanMessage(content=first_message),
+        response = llm.completion([
+            Message(role="system", content="You are a title generator. Given the content, generate a very short title (3-5 words max) that summarizes what the content is about. Only respond with the title, nothing else."),
+            Message(role="user", content=first_message),
         ])
 
-        title = response.get("text", "").strip()
+        title = response.content.strip()
         title = title.strip('"\'')
         result = title[:50] if title else "New Chat"
         print(f"[TitleGenerator] Final title: {result}")

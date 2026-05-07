@@ -13,6 +13,7 @@ import os
 import re
 from typing import Optional
 
+from llm_client import Message
 from services.embedding_service import get_file_chunks
 from services.llm_factory import create_llm_client
 
@@ -21,28 +22,6 @@ LLM_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "200000"))
 # Rough estimate: 1 token ≈ 4 characters for Chinese/English mixed content
 CHARS_PER_TOKEN = 4
 MAX_CONTEXT_CHARS = LLM_CONTEXT_WINDOW * CHARS_PER_TOKEN
-
-
-def _extract_text_from_response(response) -> str:
-    """Extract text string from LLM invoke response (dict with text/thinking keys)."""
-    if isinstance(response, dict):
-        return response.get("text", "")
-    if hasattr(response, "content"):
-        content = response.content
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "thinking":
-                        pass
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            return "".join(text_parts)
-    return str(response)
 
 
 def _build_conversation_history_text(messages: list) -> str:
@@ -87,10 +66,9 @@ Respond in JSON format only, without any markdown or explanation:
 
     try:
         llm = create_llm_client()
-        from langchain_core.messages import HumanMessage
-        response = await llm.invoke([HumanMessage(content=prompt)])
+        response = await llm.async_completion([Message(role="user", content=prompt)])
 
-        content = _extract_text_from_response(response)
+        content = response.content
         # Extract JSON from response
         json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
         if json_match:
@@ -217,10 +195,9 @@ From here starts the query and the contexts, for each piece of context, it start
 
     try:
         llm = create_llm_client()
-        from langchain_core.messages import HumanMessage
-        response = await llm.invoke([HumanMessage(content=prompt)])
+        response = await llm.async_completion([Message(role="user", content=prompt)])
 
-        content = _extract_text_from_response(response)
+        content = response.content
 
         # Extract JSON array from response
         json_match = re.search(r'\[[\s\S]*\]', content)

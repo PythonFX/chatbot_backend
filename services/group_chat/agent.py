@@ -16,9 +16,9 @@ import re
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
-from services.llm_factory import create_llm_client, _LLMClientAdapter, _convert_langchain_messages, MODEL_DISPLAY_NAMES
+from services.llm_factory import create_llm_client, ModelLLMClient, MODEL_DISPLAY_NAMES
 
-from llm_client import Message
+from llm_client import Message, StreamEvent
 
 
 EVALUATE_SYSTEM_PROMPT = """\
@@ -92,10 +92,10 @@ class GroupChatAgent:
     def __init__(self, model_id: str, display_name: Optional[str] = None):
         self.model_id = model_id
         self.display_name = display_name or MODEL_DISPLAY_NAMES.get(model_id, model_id)
-        self._llm: Optional[_LLMClientAdapter] = None
+        self._llm: Optional[ModelLLMClient] = None
 
     @property
-    def llm(self) -> _LLMClientAdapter:
+    def llm(self) -> ModelLLMClient:
         if self._llm is None:
             self._llm = create_llm_client(model=self.model_id)
         return self._llm
@@ -139,8 +139,8 @@ class GroupChatAgent:
         all_messages = [Message(role="system", content=system_prompt)] + conv_messages
 
         try:
-            response = self.llm.invoke(all_messages)
-            text = response.get("text", "").strip()
+            response = self.llm.completion(all_messages)
+            text = response.content.strip()
             return self._parse_evaluation(text)
         except Exception as e:
             print(f"[GroupChatAgent:{self.model_id}] Evaluate error: {e}")
@@ -208,8 +208,13 @@ class GroupChatAgent:
         all_messages = [Message(role="system", content=system_prompt)] + conv_messages
 
         try:
-            async for chunk in self.llm.astream(all_messages):
-                yield chunk
+            async for chunk in self.llm.async_stream(all_messages):
+                if chunk.event == StreamEvent.TEXT:
+                    yield {"text": chunk.data, "thinking": None}
+                elif chunk.event == StreamEvent.THINKING:
+                    yield {"text": "", "thinking": chunk.data}
+                elif chunk.event == StreamEvent.DONE:
+                    break
         except Exception as e:
             print(f"[GroupChatAgent:{self.model_id}] Respond error: {e}")
             yield {"text": f"[Error generating response: {str(e)}]", "thinking": None}

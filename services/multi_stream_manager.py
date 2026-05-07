@@ -9,6 +9,7 @@ from typing import Optional
 
 from services import conversation_service
 from services.llm_factory import create_llm_client, get_available_models, get_current_model
+from llm_client import StreamEvent
 from services.title_generator import generate_title
 
 
@@ -94,30 +95,33 @@ class MultiStreamManager:
         full_thinking = ""
 
         try:
-            async for parsed in llm.astream(messages):
+            async for chunk in llm.async_stream(messages):
                 if state.stop_event.is_set():
                     ms.is_stopped = True
                     break
 
-                if parsed.get("thinking"):
-                    full_thinking += parsed["thinking"]
+                if chunk.event == StreamEvent.THINKING:
+                    full_thinking += chunk.data
                     ms.full_thinking = full_thinking
                     state.chunks.append({
                         "type": "thinking",
-                        "thinking": parsed["thinking"],
+                        "thinking": chunk.data,
                         "model": model,
                     })
                     state.event.set()
 
-                if parsed.get("text"):
-                    full_text += parsed["text"]
+                elif chunk.event == StreamEvent.TEXT:
+                    full_text += chunk.data
                     ms.full_text = full_text
                     state.chunks.append({
                         "type": "chunk",
-                        "text": parsed["text"],
+                        "text": chunk.data,
                         "model": model,
                     })
                     state.event.set()
+
+                elif chunk.event == StreamEvent.DONE:
+                    break
 
                 await asyncio.sleep(0)
 
