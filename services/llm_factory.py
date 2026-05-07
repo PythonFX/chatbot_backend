@@ -138,9 +138,29 @@ class _LLMClientAdapter:
         else:
             self._provider = None  # use default
 
-    async def astream(self, messages: list) -> AsyncIterator[dict]:
+    def _extract_system(self, llm_messages: list[Message]) -> tuple[Optional[str], list[Message]]:
+        """Extract system message from the list and return (system_prompt, remaining_messages).
+
+        Some providers (e.g. Doubao/GLM) don't support system messages in the message list
+        but accept a separate `system=` parameter. This method separates them so the caller
+        can pass the system prompt via the proper parameter.
+        """
+        system_parts = []
+        non_system = []
+        for m in llm_messages:
+            if m.role == "system":
+                system_parts.append(m.content)
+            else:
+                non_system.append(m)
+        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        return system_prompt, non_system
+
+    async def astream(self, messages: list, system: Optional[str] = None) -> AsyncIterator[dict]:
         llm_messages = _convert_langchain_messages(messages)
-        async for chunk in self._llm.async_stream(llm_messages, provider=self._provider):
+        extracted_system, llm_messages = self._extract_system(llm_messages)
+        # Caller-provided system takes precedence; otherwise use extracted
+        system_prompt = system or extracted_system
+        async for chunk in self._llm.async_stream(llm_messages, system=system_prompt, provider=self._provider):
             if chunk.event == StreamEvent.TEXT:
                 yield {"text": chunk.data, "thinking": None}
             elif chunk.event == StreamEvent.THINKING:
@@ -148,9 +168,11 @@ class _LLMClientAdapter:
             elif chunk.event == StreamEvent.DONE:
                 return
 
-    def invoke(self, messages: list) -> dict:
+    def invoke(self, messages: list, system: Optional[str] = None) -> dict:
         llm_messages = _convert_langchain_messages(messages)
-        response = self._llm.completion(llm_messages, provider=self._provider)
+        extracted_system, llm_messages = self._extract_system(llm_messages)
+        system_prompt = system or extracted_system
+        response = self._llm.completion(llm_messages, system=system_prompt, provider=self._provider)
         return {"text": response.content, "thinking": response.thinking or None}
 
 
