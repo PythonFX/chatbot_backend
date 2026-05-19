@@ -71,8 +71,12 @@ async def switch_model(req: ModelSwitchRequest):
 
 @app.get("/model/list")
 async def list_models():
-    from services.llm_manager import get_current_model, get_available_models
-    return {"current": get_current_model(), "available": get_available_models()}
+    from services.llm_manager import get_current_model, get_available_models, get_model_info
+    return {
+        "current": get_current_model(),
+        "available": get_available_models(),
+        "models": get_model_info(),
+    }
 
 
 if __name__ == "__main__":

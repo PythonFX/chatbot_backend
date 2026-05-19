@@ -109,6 +109,17 @@ def get_available_models() -> list[str]:
     return [m for m, p in MODEL_TO_PROVIDER.items() if p in llm._clients]
 
 
+def get_model_info() -> list[dict]:
+    """Return list of {id, display_name} for all available models."""
+    llm = _init_llm_client()
+    registered = {p for p in Provider}
+    return [
+        {"id": m, "display_name": MODEL_DISPLAY_NAMES.get(m, m)}
+        for m, p in MODEL_TO_PROVIDER.items()
+        if p in llm._clients
+    ]
+
+
 # ── ModelLLMClient: thin wrapper routing to a specific model's provider ──────
 
 class ModelLLMClient:
