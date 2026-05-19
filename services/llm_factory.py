@@ -10,18 +10,17 @@ from llm_client import (
     Message,
     Provider,
     StreamChunk,
-    StreamEvent,
     create_anthropic_client,
-    create_doubao_client,
     create_kimi_client,
     create_mlx_client,
+    create_zhipu_client
 )
 
 # ── Model ↔ Provider mapping ────────────────────────────────────────────────
 
 MODEL_TO_PROVIDER: dict[str, Provider] = {
     "Minimax": Provider.ANTHROPIC,
-    "GLM-5.1": Provider.DOUBAO,
+    "GLM-5.1": Provider.ZHIPU,
     "Kimi K2.6": Provider.KIMI,
     "Gemma4-e4b": Provider.MLX,
 }
@@ -56,10 +55,10 @@ def _init_llm_client() -> LLMClient:
     except KeyError as e:
         print(f"[LLMFactory] Skipped minimax: {e}")
 
-    # glm5.1 via Doubao API
+    # glm5.1 via zhipu API
     try:
-        llm.add_client(Provider.DOUBAO, create_doubao_client(profile_name="doubao-glm"))
-        print("[LLMFactory] Registered: glm5.1 (Doubao)")
+        llm.add_client(Provider.DOUBAO, create_zhipu_client())
+        print("[LLMFactory] Registered: glm5.1")
     except KeyError as e:
         print(f"[LLMFactory] Skipped glm5.1: {e}")
 
