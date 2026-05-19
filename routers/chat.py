@@ -25,6 +25,7 @@ class ChatRequest(BaseModel):
     resume: bool = False
     deep_qa_mode: bool = False
     multi_model: bool = False
+    thinking_enabled: bool = True
 
 
 class ChatResponse(BaseModel):
@@ -307,6 +308,7 @@ async def chat_stream(request: ChatRequest):
                 models=models,
                 title=title,
                 rag_contexts=rag_chunks,
+                thinking_enabled=request.thinking_enabled,
             )
 
             version_map = {m: i for i, m in enumerate(models)}
@@ -372,6 +374,7 @@ async def chat_stream(request: ChatRequest):
                 llm_messages,
                 title=title,
                 rag_contexts=rag_chunks,
+                thinking_enabled=request.thinking_enabled,
             )
 
             yield f"data: {json.dumps({'type': 'start', 'message_id': assistant_msg_id, 'title': title})}\n\n"
@@ -675,8 +678,13 @@ async def generate_version_stream(message_id: str, request: GenerateVersionReque
         full_text = ""
         full_thinking = ""
 
+        from services.db_service import db_get_setting
+        thinking_enabled = db_get_setting("thinking_enabled", "true").lower() == "true"
+        from services.stream_manager import _build_thinking_kwargs
+        thinking_kwargs = _build_thinking_kwargs(get_current_model(), thinking_enabled)
+
         try:
-            async for chunk in llm.async_stream(llm_messages):
+            async for chunk in llm.async_stream(llm_messages, **thinking_kwargs):
                 if chunk.event == StreamEvent.THINKING:
                     thinking_chunk = chunk.data
                     full_thinking += thinking_chunk

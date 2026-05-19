@@ -11,6 +11,7 @@ from services import conversation_service
 from services.llm_manager import create_llm_client, get_available_models, get_current_model
 from llm_client import StreamEvent
 from services.title_generator import generate_title
+from services.stream_manager import _build_thinking_kwargs
 
 
 @dataclass
@@ -61,6 +62,7 @@ class MultiStreamManager:
         models: list[str],
         title: str = "New Chat",
         rag_contexts: list[dict] | None = None,
+        thinking_enabled: bool = True,
     ) -> MultiStreamState:
         if conversation_id in self._streams:
             state = self._streams[conversation_id]
@@ -82,20 +84,22 @@ class MultiStreamManager:
         self._streams[conversation_id] = state
 
         state.task = asyncio.create_task(
-            self._run_multi_stream(state, messages)
+            self._run_multi_stream(state, messages, thinking_enabled)
         )
         print(f"[MultiStreamManager] Started multi-stream for: {conversation_id} models={models}")
         return state
 
-    async def _run_single_model(self, state: MultiStreamState, model: str, messages: list):
+    async def _run_single_model(self, state: MultiStreamState, model: str, messages: list, thinking_enabled: bool = True):
         """Run a single model's stream and push chunks to the shared queue."""
         ms = state.model_states[model]
         llm = create_llm_client(model=model)
         full_text = ""
         full_thinking = ""
 
+        thinking_kwargs = _build_thinking_kwargs(model, thinking_enabled)
+
         try:
-            async for chunk in llm.async_stream(messages):
+            async for chunk in llm.async_stream(messages, **thinking_kwargs):
                 if state.stop_event.is_set():
                     ms.is_stopped = True
                     break
@@ -160,11 +164,11 @@ class MultiStreamManager:
             state.event.set()
             print(f"[MultiStreamManager] Model {model} error: {e}")
 
-    async def _run_multi_stream(self, state: MultiStreamState, messages: list):
+    async def _run_multi_stream(self, state: MultiStreamState, messages: list, thinking_enabled: bool = True):
         """Background task that runs all model streams concurrently."""
         try:
             await asyncio.gather(*[
-                self._run_single_model(state, model, messages)
+                self._run_single_model(state, model, messages, thinking_enabled)
                 for model in state.models
             ])
 

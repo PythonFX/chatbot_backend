@@ -58,6 +58,27 @@ class ModelSwitchRequest(BaseModel):
     model: str
 
 
+class SettingsRequest(BaseModel):
+    thinking_enabled: bool | None = None
+
+
+@app.get("/settings")
+async def get_settings():
+    from services.db_service import db_get_all_settings, db_get_setting
+    settings = db_get_all_settings()
+    return {
+        "thinking_enabled": settings.get("thinking_enabled", "true").lower() == "true",
+    }
+
+
+@app.put("/settings")
+async def update_settings(req: SettingsRequest):
+    from services.db_service import db_set_setting
+    if req.thinking_enabled is not None:
+        db_set_setting("thinking_enabled", str(req.thinking_enabled).lower())
+    return {"status": "ok"}
+
+
 @app.post("/model/switch")
 async def switch_model(req: ModelSwitchRequest):
     from services.llm_manager import set_current_model, get_current_model, get_available_models

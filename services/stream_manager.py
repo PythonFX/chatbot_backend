@@ -10,6 +10,21 @@ from llm_client import StreamEvent
 from services.title_generator import generate_title
 
 
+THINKING_CONFIG = {"type": "enabled", "budget_tokens": 10000}
+
+
+def _build_thinking_kwargs(model: str, thinking_enabled: bool) -> dict:
+    """Build kwargs for LLM client based on thinking toggle and current model."""
+    from services.llm_manager import MODEL_TO_PROVIDER, Provider
+    provider = MODEL_TO_PROVIDER.get(model)
+    kwargs = {}
+    if provider == Provider.MLX:
+        kwargs["enable_thinking"] = thinking_enabled
+    else:
+        kwargs["thinking"] = THINKING_CONFIG if thinking_enabled else None
+    return kwargs
+
+
 @dataclass
 class StreamState:
     """State for an active stream."""
@@ -52,6 +67,7 @@ class StreamManager:
         messages: list,
         title: str = "New Chat",
         rag_contexts: list[dict] | None = None,
+        thinking_enabled: bool = True,
     ) -> StreamState:
         """
         Start a background task that continuously receives LLM chunks.
@@ -76,24 +92,27 @@ class StreamManager:
 
         # Create background task (does NOT inherit from asyncio.CancelledError of HTTP)
         state.task = asyncio.create_task(
-            self._run_llm_stream(state, messages)
+            self._run_llm_stream(state, messages, thinking_enabled)
         )
 
         print(f"[StreamManager] Started stream for conversation: {conversation_id}")
         return state
 
-    async def _run_llm_stream(self, state: StreamState, messages: list):
+    async def _run_llm_stream(self, state: StreamState, messages: list, thinking_enabled: bool = True):
         """
         Background task that continuously receives chunks from LLM.
         This runs independently of any HTTP connection.
         """
+        from services.llm_manager import get_current_model
         llm = create_llm_client()
         full_text = ""
         full_thinking = ""
 
+        thinking_kwargs = _build_thinking_kwargs(get_current_model(), thinking_enabled)
+
         try:
             print(f"[StreamManager] Beginning LLM stream for: {state.conversation_id}")
-            async for chunk in llm.async_stream(messages):
+            async for chunk in llm.async_stream(messages, **thinking_kwargs):
                 if state.stop_event.is_set():
                     print(f"[StreamManager] Stop event detected for: {state.conversation_id}")
                     break

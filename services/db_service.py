@@ -85,6 +85,10 @@ def init_tables() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
         """)
         conn.commit()
@@ -377,6 +381,37 @@ def db_sync_conversation(conv: dict) -> None:
         conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv["id"],))
         for msg in conv.get("messages", []):
             db_add_message_raw(msg)
+    finally:
+        conn.close()
+
+
+def db_get_setting(key: str, default: str | None = None) -> str | None:
+    conn = _get_db()
+    try:
+        cur = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else default
+    finally:
+        conn.close()
+
+
+def db_set_setting(key: str, value: str) -> None:
+    conn = _get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_get_all_settings() -> dict[str, str]:
+    conn = _get_db()
+    try:
+        cur = conn.execute("SELECT key, value FROM settings")
+        return {row["key"]: row["value"] for row in cur.fetchall()}
     finally:
         conn.close()
 

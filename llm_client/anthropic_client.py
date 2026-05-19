@@ -135,8 +135,9 @@ class AnthropicClient(BaseLLMClient):
         ant_tools = self._build_tools(tools)
         if ant_tools:
             body["tools"] = ant_tools
-        if self._thinking:
-            body["thinking"] = self._thinking
+        thinking_config = kwargs.pop("thinking", self._thinking)
+        if thinking_config:
+            body["thinking"] = thinking_config
         body.update(kwargs)
         return body
 
