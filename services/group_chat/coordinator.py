@@ -15,7 +15,7 @@ import json
 from typing import AsyncIterator, Optional
 
 from services.group_chat.agent import GroupChatAgent, EvaluationResult
-from services.llm_factory import is_llm_configured, get_available_models, MODEL_DISPLAY_NAMES
+from services.llm_manager import is_llm_configured, get_available_models, MODEL_DISPLAY_NAMES
 
 
 class GroupChatCoordinator:

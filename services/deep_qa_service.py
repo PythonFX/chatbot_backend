@@ -15,7 +15,7 @@ from typing import Optional
 
 from llm_client import Message
 from services.embedding_service import get_file_chunks
-from services.llm_factory import create_llm_client
+from services.llm_manager import create_llm_client
 
 
 LLM_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "200000"))

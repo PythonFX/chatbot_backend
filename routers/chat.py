@@ -10,7 +10,7 @@ from llm_client import Message, StreamEvent
 from services import conversation_service
 from services.conversation_service import save_conversation
 from services.title_generator import generate_title
-from services.llm_factory import create_llm_client, is_llm_configured, get_available_models, get_current_model
+from services.llm_manager import create_llm_client, is_llm_configured, get_available_models, get_current_model
 from services.stream_manager import stream_manager
 from services.multi_stream_manager import multi_stream_manager
 from services.embedding_service import search_chunks_in_files

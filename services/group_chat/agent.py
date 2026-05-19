@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
-from services.llm_factory import create_llm_client, ModelLLMClient, MODEL_DISPLAY_NAMES
+from services.llm_manager import create_llm_client, ModelLLMClient, MODEL_DISPLAY_NAMES
 
 from llm_client import Message, StreamEvent
 

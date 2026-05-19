@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from services import conversation_service
-from services.llm_factory import create_llm_client, get_available_models, get_current_model
+from services.llm_manager import create_llm_client, get_available_models, get_current_model
 from llm_client import StreamEvent
 from services.title_generator import generate_title
 

@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services import conversation_service
-from services.llm_factory import get_available_models, is_llm_configured, MODEL_DISPLAY_NAMES
+from services.llm_manager import get_available_models, is_llm_configured, MODEL_DISPLAY_NAMES
 from services.group_chat.coordinator import GroupChatCoordinator, create_coordinator_for_conversation
 
 router = APIRouter(prefix="/group-chat", tags=["group-chat"])

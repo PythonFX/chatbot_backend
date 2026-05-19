@@ -1,5 +1,5 @@
 from llm_client import Message
-from services.llm_factory import create_llm_client
+from services.llm_manager import create_llm_client
 
 
 def generate_title(first_message: str) -> str:
