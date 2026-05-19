@@ -57,7 +57,7 @@ def _init_llm_client() -> LLMClient:
 
     # glm5.1 via zhipu API
     try:
-        llm.add_client(Provider.DOUBAO, create_zhipu_client())
+        llm.add_client(Provider.ZHIPU, create_zhipu_client())
         print("[LLMFactory] Registered: glm5.1")
     except KeyError as e:
         print(f"[LLMFactory] Skipped glm5.1: {e}")

@@ -117,16 +117,20 @@ def create_azure_client_ad_token(
 
 def create_zhipu_client(
     profile_name: str = "zhipu-glm",
+    thinking: bool = True,
     timeout: float = 300.0,
     **overrides: Any,
 ) -> AnthropicClient:
     p = get_profile(profile_name) | overrides
+    thinking_config = p.get("thinking")
+    if thinking_config is None:
+        thinking_config = {"type": "enabled", "budget_tokens": 10000} if thinking else None
     return AnthropicClient(
         api_key=p["api_key"],
         base_url=p.get("base_url"),
         model=p.get("model"),
         auth_mode=p.get("auth_mode", "bearer"),
-        thinking=p.get("thinking"),
+        thinking=thinking_config,
         timeout=timeout,
     )
 
