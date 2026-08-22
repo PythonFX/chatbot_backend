@@ -58,6 +58,11 @@ class ModelSwitchRequest(BaseModel):
     model: str
 
 
+class ModelToggleRequest(BaseModel):
+    model: str
+    enabled: bool
+
+
 class SettingsRequest(BaseModel):
     thinking_enabled: bool | None = None
 
@@ -94,6 +99,23 @@ async def switch_model(req: ModelSwitchRequest):
 async def list_models():
     from services.llm_manager import get_current_model, get_available_models, get_model_info
     return {
+        "current": get_current_model(),
+        "available": get_available_models(),
+        "models": get_model_info(),
+    }
+
+
+@app.post("/model/toggle")
+async def toggle_model(req: ModelToggleRequest):
+    from services.llm_manager import (
+        set_model_enabled, get_current_model, get_available_models, get_model_info,
+    )
+    try:
+        set_model_enabled(req.model, req.enabled)
+    except ValueError as e:
+        return {"status": "error", "error": str(e)}
+    return {
+        "status": "ok",
         "current": get_current_model(),
         "available": get_available_models(),
         "models": get_model_info(),

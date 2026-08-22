@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from services import conversation_service
-from services.llm_manager import get_available_models, is_llm_configured, MODEL_DISPLAY_NAMES
+from services.llm_manager import get_available_models, get_model_info
 from services.group_chat.coordinator import GroupChatCoordinator, create_coordinator_for_conversation
 
 router = APIRouter(prefix="/group-chat", tags=["group-chat"])
@@ -58,23 +58,11 @@ async def create_group_chat(request: CreateGroupChatRequest):
 
 @router.get("/agents")
 async def list_available_agents():
-    """List all AI agents available for group chat."""
-    available = get_available_models()
-    agents = []
-    for model_id in available:
-        agents.append({
-            "id": model_id,
-            "name": MODEL_DISPLAY_NAMES.get(model_id, model_id),
-            "available": True,
-        })
-    # Also list models that exist but aren't configured
-    for model_id, display_name in MODEL_DISPLAY_NAMES.items():
-        if model_id not in available:
-            agents.append({
-                "id": model_id,
-                "name": display_name,
-                "available": False,
-            })
+    """List all chat models; enabled ones are available for group chat."""
+    agents = [
+        {"id": m["id"], "name": m["display_name"], "available": m["enabled"]}
+        for m in get_model_info()
+    ]
     return {"agents": agents}
 
 

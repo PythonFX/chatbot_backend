@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
-from services.llm_manager import create_llm_client, ModelLLMClient, MODEL_DISPLAY_NAMES
+from services.llm_manager import create_llm_client, ModelLLMClient, get_display_name
 
 from llm_client import Message, StreamEvent
 
@@ -91,7 +91,7 @@ class EvaluationResult:
 class GroupChatAgent:
     def __init__(self, model_id: str, display_name: Optional[str] = None):
         self.model_id = model_id
-        self.display_name = display_name or MODEL_DISPLAY_NAMES.get(model_id, model_id)
+        self.display_name = display_name or get_display_name(model_id)
         self._llm: Optional[ModelLLMClient] = None
 
     @property

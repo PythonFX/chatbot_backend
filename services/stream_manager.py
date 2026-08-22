@@ -15,14 +15,14 @@ THINKING_CONFIG = {"type": "enabled", "budget_tokens": 10000}
 
 def _build_thinking_kwargs(model: str, thinking_enabled: bool) -> dict:
     """Build kwargs for LLM client based on thinking toggle and current model."""
-    from services.llm_manager import MODEL_TO_PROVIDER, Provider
-    provider = MODEL_TO_PROVIDER.get(model)
-    kwargs = {}
-    if provider == Provider.MLX:
-        kwargs["enable_thinking"] = thinking_enabled
-    else:
-        kwargs["thinking"] = THINKING_CONFIG if thinking_enabled else None
-    return kwargs
+    from services.llm_manager import get_model_provider
+    try:
+        provider = get_model_provider(model)
+    except Exception:
+        provider = None
+    if provider == "mlx":
+        return {"enable_thinking": thinking_enabled}
+    return {"thinking": THINKING_CONFIG if thinking_enabled else None}
 
 
 @dataclass

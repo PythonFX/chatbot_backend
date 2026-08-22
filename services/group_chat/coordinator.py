@@ -15,7 +15,7 @@ import json
 from typing import AsyncIterator, Optional
 
 from services.group_chat.agent import GroupChatAgent, EvaluationResult
-from services.llm_manager import is_llm_configured, get_available_models, MODEL_DISPLAY_NAMES
+from services.llm_manager import is_llm_configured, get_available_models, get_display_name
 
 
 class GroupChatCoordinator:
@@ -176,8 +176,7 @@ def create_coordinator_for_conversation(agent_ids: list[str]) -> Optional[GroupC
     agents = []
     for model_id in agent_ids:
         if is_llm_configured(model=model_id):
-            display_name = MODEL_DISPLAY_NAMES.get(model_id, model_id)
-            agents.append(GroupChatAgent(model_id=model_id, display_name=display_name))
+            agents.append(GroupChatAgent(model_id=model_id, display_name=get_display_name(model_id)))
         else:
             print(f"[GroupChat] Skipping unconfigured model: {model_id}")
 
